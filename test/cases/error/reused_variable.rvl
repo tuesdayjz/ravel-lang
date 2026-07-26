@@ -1,0 +1,3 @@
+def bad(x) = add(x, x)
+
+bad(2)

@@ -1,0 +1,1 @@
+let x = add(1, 2) in dup x as a, b in add(a, b)

@@ -1,0 +1,11 @@
+# Functional example: factorial via linear multiplication.
+
+def mul(0, y) = drop y in 0
+
+def mul(succ(x), y) = dup y as a, b in let partial = mul(x, a) in add(b, partial)
+
+def fact(0) = succ(0)
+
+def fact(succ(n)) = dup n as k, m in let sub = fact(k) in mul(succ(m), sub)
+
+fact(5)

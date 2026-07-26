@@ -1,0 +1,2 @@
+def plus(0, y) = y
+plus(1, 2

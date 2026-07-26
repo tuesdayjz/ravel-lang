@@ -1,0 +1,1 @@
+dup 2 as a, b in add(a, b)

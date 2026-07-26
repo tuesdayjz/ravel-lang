@@ -1,0 +1,5 @@
+def plus(0, y) = y
+
+def plus(succ(x), y) = succ(plus(x, y))
+
+plus(2, 3)

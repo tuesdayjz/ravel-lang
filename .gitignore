@@ -1,0 +1,12 @@
+ravel
+ravel_test
+out.txt
+*.cmi
+*.cmx
+*.o
+src/*.cmi
+src/*.cmx
+src/*.o
+test/*.cmi
+test/*.cmx
+test/*.o

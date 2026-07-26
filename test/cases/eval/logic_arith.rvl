@@ -1,0 +1,29 @@
+def not(0) = succ(0)
+
+def not(succ(n)) = drop n in 0
+
+def and(0, b) = drop b in 0
+
+def and(succ(a), b) = drop a in b
+
+def is_zero(0) = succ(0)
+
+def is_zero(succ(n)) = drop n in 0
+
+def eq(0, m) = is_zero(m)
+
+def eq(succ(n), m) = eq_rhs(m, n)
+
+def eq_rhs(0, n) = drop n in 0
+
+def eq_rhs(succ(m), n) = eq(m, n)
+
+def leq(0, m) = drop m in succ(0)
+
+def leq(succ(n), m) = leq_rhs(m, n)
+
+def leq_rhs(0, n) = drop n in 0
+
+def leq_rhs(succ(m), n) = leq(n, m)
+
+and(eq(add(2, 3), 5), and(leq(3, 5), not(eq(4, 5))))

@@ -1,0 +1,7 @@
+def plus(0, y) = y
+
+def plus(succ(x), y) = succ(plus(x, y))
+
+def double(n) = dup n as a, b in plus(a, b)
+
+double(3)

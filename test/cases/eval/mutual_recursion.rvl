@@ -1,0 +1,9 @@
+def even(0) = succ(0)
+
+def even(succ(n)) = odd(n)
+
+def odd(0) = 0
+
+def odd(succ(n)) = even(n)
+
+odd(3)

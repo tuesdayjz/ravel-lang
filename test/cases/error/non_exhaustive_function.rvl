@@ -1,0 +1,3 @@
+def only_zero(0) = 0
+
+only_zero(0)

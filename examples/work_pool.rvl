@@ -1,0 +1,11 @@
+# Concurrent-flavored example: four independent worker jobs.
+# Each square(...) call becomes an independent subnet that can be reduced
+# in any interleaving with the others.
+
+def mul(0, y) = drop y in 0
+
+def mul(succ(x), y) = dup y as a, b in let partial = mul(x, a) in add(b, partial)
+
+def square(n) = dup n as a, b in mul(a, b)
+
+add(square(6), add(square(5), add(square(4), square(3))))

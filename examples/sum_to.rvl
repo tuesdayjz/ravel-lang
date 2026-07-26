@@ -1,0 +1,5 @@
+def sum_to(0) = 0
+
+def sum_to(succ(n)) = dup n as k, m in let rest = sum_to(k) in add(succ(m), rest)
+
+sum_to(4)

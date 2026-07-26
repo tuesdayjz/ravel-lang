@@ -1,0 +1,2 @@
+# comment
+ let x = 2 in drop x in 0

@@ -6,7 +6,7 @@ type run_result = {
   final_net : Interaction_net.net;
   root : int;
   log : (string * string) list;
-  value : int;
+  value : Interaction_net.value;
 }
 
 let parse_string source = Parser.parse source
@@ -41,7 +41,7 @@ let run_program ?(strategy = First) ?seed program =
       ~pick:(pick_for_strategy strategy) initial_net
   in
   let value =
-    Interaction_net.readback final_net
+    Interaction_net.readback_value final_net
       (Interaction_net.observe_root compiled.root final_net)
   in
   { program; initial_net; final_net; root = compiled.root; log; value }

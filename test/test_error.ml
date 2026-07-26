@@ -23,10 +23,5 @@ let run () =
 
   Test_support.run_test "non_exhaustive_function_error" (fun () ->
       Test_support.expect_compile_error "non_exhaustive_function_error"
-        "function 'only_zero' is non-exhaustive; provide both 0 and succ(x) clauses or a single catch-all clause"
-        (fun () -> Driver.run_file (cases_dir ^ "/non_exhaustive_function.rvl")));
-
-  Test_support.run_test "mixed_catchall_error" (fun () ->
-      Test_support.expect_compile_error "mixed_catchall_error"
-        "function 'f' cannot mix a catch-all clause with constructor clauses"
-        (fun () -> Driver.run_file (cases_dir ^ "/mixed_catchall.rvl")))
+        "function 'only_zero' is non-exhaustive; natural-number matches must cover both 0 and succ(...) or include a variable or '_' fallback"
+        (fun () -> Driver.run_file (cases_dir ^ "/non_exhaustive_function.rvl")))

@@ -1,0 +1,7 @@
+def first_nested(Cons(Cons(value, _), _), _) = value
+
+def first_nested(Cons(_, _), fallback) = fallback
+
+def first_nested(Nil, fallback) = fallback
+
+first_nested(Cons(Cons(7, Nil), Nil), 0)

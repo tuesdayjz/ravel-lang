@@ -4,8 +4,6 @@ let current st = st.tokens.(st.index)
 let current_kind st = (current st).Token.kind
 let current_pos st = (current st).Token.start_pos
 
-
-
 let advance st =
   if st.index < Array.length st.tokens - 1 then st.index <- st.index + 1
 
@@ -19,6 +17,15 @@ let expect_ident st message =
       advance st;
       name
   | _ -> Ravel_error.parse_error (current_pos st) message
+
+let matches_lparen = function Token.TLParen -> true | _ -> false
+
+let is_constructor_name name =
+  String.length name > 0
+  &&
+  match name.[0] with
+  | 'A' .. 'Z' -> true
+  | _ -> false
 
 let rec parse_nonempty_args st =
   let rec loop acc =
@@ -34,19 +41,23 @@ let rec parse_nonempty_args st =
   in
   loop []
 
-and parse_call_after_name st name =
-  expect st (function Token.TLParen -> true | _ -> false)
-    "expected '(' after function name";
-  let args =
-    match current_kind st with
-    | Token.TRParen ->
-        Ravel_error.parse_error (current_pos st)
-          "function calls must have at least one argument"
-    | _ -> parse_nonempty_args st
-  in
+and parse_args st =
+  match current_kind st with
+  | Token.TRParen -> []
+  | _ -> parse_nonempty_args st
+
+and parse_named_application_after_name st name =
+  expect st matches_lparen "expected '(' after name";
+  let args = parse_args st in
   expect st (function Token.TRParen -> true | _ -> false)
     "expected ')' after argument list";
-  Ast.Call (name, args)
+  if is_constructor_name name then Ast.Constr (name, args)
+  else
+    match args with
+    | [] ->
+        Ravel_error.parse_error (current_pos st)
+          "function calls must have at least one argument"
+    | _ -> Ast.Call (name, args)
 
 and parse_succ_expr st =
   expect st (function Token.TSucc -> true | _ -> false) "expected 'succ'";
@@ -104,7 +115,8 @@ and parse_atom st =
       Ast.Int n
   | Token.TIdent name ->
       advance st;
-      if matches_lparen (current_kind st) then parse_call_after_name st name
+      if matches_lparen (current_kind st) then parse_named_application_after_name st name
+      else if is_constructor_name name then Ast.Constr (name, [])
       else Ast.Var name
   | Token.TSucc -> parse_succ_expr st
   | Token.TLParen ->
@@ -114,55 +126,94 @@ and parse_atom st =
       expr
   | _ -> Ravel_error.parse_error (current_pos st) "expected expression"
 
-and matches_lparen = function Token.TLParen -> true | _ -> false
+let rec parse_nonempty_patterns st =
+  let rec loop acc =
+    let pattern = parse_pattern st in
+    match current_kind st with
+    | Token.TComma ->
+        advance st;
+        loop (pattern :: acc)
+    | Token.TRParen -> List.rev (pattern :: acc)
+    | _ ->
+        Ravel_error.parse_error (current_pos st)
+          "expected ',' or ')' in function pattern list"
+  in
+  loop []
 
-let parse_pattern st =
+and parse_pattern_application_after_name st name =
+  if name = "_" then
+    Ravel_error.parse_error (current_pos st)
+      "wildcard '_' cannot be applied as a constructor pattern";
+  expect st matches_lparen "expected '(' after constructor name in pattern";
+  let args =
+    match current_kind st with
+    | Token.TRParen -> []
+    | _ ->
+        let rec loop acc =
+          let pattern = parse_pattern st in
+          match current_kind st with
+          | Token.TComma ->
+              advance st;
+              loop (pattern :: acc)
+          | Token.TRParen -> List.rev (pattern :: acc)
+          | _ ->
+              Ravel_error.parse_error (current_pos st)
+                "expected ',' or ')' in constructor pattern"
+        in
+        loop []
+  in
+  expect st (function Token.TRParen -> true | _ -> false)
+    "expected ')' after constructor pattern";
+  Ast.PConstr (name, args)
+
+and parse_succ_pattern st =
+  expect st (function Token.TSucc -> true | _ -> false) "expected 'succ'";
+  expect st (function Token.TLParen -> true | _ -> false)
+    "expected '(' after 'succ' in pattern";
+  let pattern = parse_pattern st in
+  expect st (function Token.TRParen -> true | _ -> false)
+    "expected ')' after succ(...) pattern";
+  match pattern with
+  | Ast.PVar name -> Ast.PSucc name
+  | _ -> Ast.PConstr ("succ", [ pattern ])
+
+and parse_pattern st =
   match current_kind st with
   | Token.TInt 0 ->
       advance st;
       Ast.PZero
   | Token.TInt _ ->
       Ravel_error.parse_error (current_pos st)
-        "only 0 is allowed as a literal pattern; use succ(x) for successors"
-  | Token.TSucc ->
-      advance st;
-      expect st (function Token.TLParen -> true | _ -> false)
-        "expected '(' after 'succ' in pattern";
-      let name = expect_ident st "expected identifier inside succ(...) pattern" in
-      expect st (function Token.TRParen -> true | _ -> false)
-        "expected ')' after succ(...) pattern";
-      Ast.PSucc name
+        "only 0 is allowed as a literal pattern; use succ(...) or a constructor pattern"
+  | Token.TSucc -> parse_succ_pattern st
   | Token.TIdent name ->
       advance st;
-      Ast.PVar name
+      if matches_lparen (current_kind st) then parse_pattern_application_after_name st name
+      else if name = "_" then Ast.PWildcard
+      else if is_constructor_name name then Ast.PConstr (name, [])
+      else Ast.PVar name
   | _ ->
       Ravel_error.parse_error (current_pos st)
-        "expected a pattern (0, succ(x), or variable)"
+        "expected a pattern (0, succ(...), constructor, variable, or _)"
 
 let parse_definition st =
   expect st (function Token.TDef -> true | _ -> false) "expected 'def'";
   let name = expect_ident st "expected function name after 'def'" in
   expect st (function Token.TLParen -> true | _ -> false)
     "expected '(' after function name";
-  let pattern = parse_pattern st in
-  let rec parse_rest_params acc =
+  let patterns =
     match current_kind st with
-    | Token.TComma ->
-        advance st;
-        let param = expect_ident st "expected parameter name" in
-        parse_rest_params (param :: acc)
-    | Token.TRParen -> List.rev acc
-    | _ ->
+    | Token.TRParen ->
         Ravel_error.parse_error (current_pos st)
-          "expected ',' or ')' in function parameter list"
+          "function definitions must have at least one pattern"
+    | _ -> parse_nonempty_patterns st
   in
-  let params = parse_rest_params [] in
   expect st (function Token.TRParen -> true | _ -> false)
-    "expected ')' after function parameters";
+    "expected ')' after function patterns";
   expect st (function Token.TEqual -> true | _ -> false)
     "expected '=' after function head";
   let body = parse_expr st in
-  { Ast.name; pattern; params; body }
+  { Ast.name; patterns; body }
 
 let parse source =
   let tokens = Lexer.tokenize source |> Array.of_list in

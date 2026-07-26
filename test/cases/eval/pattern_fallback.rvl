@@ -1,0 +1,5 @@
+def first_zero(Cons(0, _)) = 0
+
+def first_zero(value) = value
+
+first_zero(Cons(1, Nil))

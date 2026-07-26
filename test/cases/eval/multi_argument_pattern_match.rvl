@@ -1,0 +1,9 @@
+def select(0, Nil) = 0
+
+def select(0, Cons(x, _)) = x
+
+def select(succ(x), Nil) = x
+
+def select(succ(_), Cons(_, y)) = y
+
+select(1, Cons(2, 3))

@@ -1,0 +1,9 @@
+def lookup(0, Cons(value, _)) = value
+
+def lookup(0, Nil) = 0
+
+def lookup(succ(index), Cons(_, rest)) = lookup(index, rest)
+
+def lookup(succ(_), Nil) = 0
+
+lookup(2, Cons(4, Cons(5, Cons(6, Nil))))

@@ -1,0 +1,5 @@
+def head_or(Cons(x, _), fallback) = x
+
+def head_or(Nil, fallback) = fallback
+
+head_or(Cons(succ(0), Nil), 0)

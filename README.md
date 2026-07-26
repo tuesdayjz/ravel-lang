@@ -7,13 +7,21 @@
 ```text
 program    ::= definition* expr
 
-definition ::= def NAME(PATTERN[, NAME ...]) = expr
-PATTERN    ::= 0 | succ(NAME) | NAME
+definition ::= def NAME(pattern[, pattern ...]) = expr
+
+pattern    ::= 0
+             | succ(pattern)
+             | CONSTRUCTOR
+             | CONSTRUCTOR(pattern, ...)
+             | NAME
+             | _
 
 expr       ::= INT
              | NAME
+             | CONSTRUCTOR
              | succ(expr)
              | NAME(expr, ...)
+             | CONSTRUCTOR(expr, ...)
              | let NAME = expr in expr
              | dup expr as NAME, NAME in expr
              | drop expr in expr
@@ -24,15 +32,24 @@ expr       ::= INT
 
 - `add(x, y)` is the built-in addition function.
 - User-defined functions may be recursive, including mutually recursive.
-- Pattern matching is intentionally minimal: only the **first** argument may be matched, using `0`, `succ(x)`, or a catch-all variable.
-- Functions must be either:
-  - one catch-all clause, or
-  - exactly two clauses covering `0` and `succ(x)`.
-- Concurrency is currently **implicit**: independent subexpressions become independent subnets, so they can reduce in different interleavings even though the language does not yet expose channels, spawning, logic variables, or backtracking.
+- Function clauses can pattern-match on any argument.
+- Constructor patterns can be nested to any depth, such as
+  `Cons(Cons(x, _), tail)`.
+- Patterns support `0`, recursive `succ(...)`, user constructors, variable
+  binders, and the `_` wildcard.
+- Clauses are considered in source order; variable and wildcard patterns can
+  be used as fallbacks after more specific clauses.
+- Natural-number matches must cover both `0` and `succ(...)`, unless a
+  variable or `_` fallback covers the remaining values.
+- Concurrency is currently **implicit**: independent subexpressions become
+  independent subnets, so they can reduce in different interleavings even
+  though the language does not yet expose channels, spawning, logic
+  variables, or backtracking.
 
 ## Linearity
 
-Variables are **linear**, including function parameters and pattern binders:
+Variables are **linear**, including function parameters and binders at any
+depth in a pattern:
 
 - use a variable at most once
 - if you need it twice, duplicate explicitly with `dup`
@@ -50,6 +67,20 @@ def double(n) = dup n as a, b in plus(a, b)
 double(3)
 ```
 
+Deep and multi-argument patterns compose directly:
+
+```text
+def lookup(0, Cons(value, _)) = value
+
+def lookup(0, Nil) = 0
+
+def lookup(succ(index), Cons(_, rest)) = lookup(index, rest)
+
+def lookup(succ(_), Nil) = 0
+
+lookup(2, Cons(4, Cons(5, Cons(6, Nil))))
+```
+
 ## Build and Install
 
 Build and install for your user into `~/.local/bin`:
@@ -58,7 +89,8 @@ Build and install for your user into `~/.local/bin`:
 make && make install
 ```
 
-If `~/.local/bin` is not already on your `PATH`, add this to your shell config (`~/.bashrc`, `~/.zshrc`, etc.), then reload your shell:
+If `~/.local/bin` is not already on your `PATH`, add this to your shell config
+(`~/.bashrc`, `~/.zshrc`, etc.), then reload your shell:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -124,14 +156,20 @@ See `examples/`
 ### Functional
 
 - `examples/fact.rvl` — factorial via linear multiplication
+- `examples/deep_patterns.rvl` — nested constructor matching with an ordered
+  fallback clause
+- `examples/multi_argument_patterns.rvl` — list lookup by matching both the
+  index and list arguments
 
 ### Logic-flavored
 
-- `examples/logic_arith.rvl` — arithmetic predicates (`eq`, `leq`, `not`, `and`) returning `0/1`
+- `examples/logic_arith.rvl` — arithmetic predicates (`eq`, `leq`, `not`,
+  `and`) returning `0/1`
 
 ### Concurrency-flavored
 
-- `examples/work_pool.rvl` — several independent worker computations composed into one result
+- `examples/work_pool.rvl` — several independent worker computations composed
+  into one result
 
 Try comparing interleavings on the work-pool example:
 

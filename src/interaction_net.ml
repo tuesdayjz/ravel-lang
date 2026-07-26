@@ -10,6 +10,8 @@ type port = int * int
 
 type agent = { symbol : string; arity : int }
 
+type value = VConstr of string * value list
+
 type net = {
   agents : agent IntMap.t;
   wires : port PortMap.t;
@@ -52,6 +54,10 @@ let def_rule rules s1 s2 (f : rule) =
   if s1 <> s2 then
     Hashtbl.replace rules (s2, s1) (fun ifc2 ifc1 net -> f ifc1 ifc2 net)
 
+let erase_port port net =
+  let e, net = new_agent "Era" 0 net in
+  connect (e, 0) port net
+
 let install_builtin_rules rules =
   def_rule rules "Z" "Add" (fun _ifcZ ifcAdd net ->
       match ifcAdd with
@@ -91,10 +97,33 @@ let install_builtin_rules rules =
   def_rule rules "Z" "Era" (fun _ _ net -> net);
   def_rule rules "S" "Era" (fun ifcS _ifcEra net ->
       match ifcS with
-      | [ x' ] ->
-          let e, net = new_agent "Era" 0 net in
-          connect (e, 0) x' net
+      | [ x' ] -> erase_port x' net
       | _ -> assert false)
+
+let install_constructor_rules rules name arity =
+  def_rule rules name "Dup" (fun ifcCtor ifcDup net ->
+      match ifcDup with
+      | [ o1; o2 ] ->
+          let c1, net = new_agent name arity net in
+          let c2, net = new_agent name arity net in
+          let net = net |> connect (c1, 0) o1 |> connect (c2, 0) o2 in
+          let rec loop slot fields net =
+            match fields with
+            | [] -> net
+            | field :: rest ->
+                let d, net = new_agent "Dup" 2 net in
+                let net =
+                  net
+                  |> connect (d, 0) field
+                  |> connect (d, 1) (c1, slot)
+                  |> connect (d, 2) (c2, slot)
+                in
+                loop (slot + 1) rest net
+          in
+          loop 1 ifcCtor net
+      | _ -> assert false);
+  def_rule rules name "Era" (fun ifcCtor _ifcEra net ->
+      List.fold_left (fun net field -> erase_port field net) net ifcCtor)
 
 let base_rulebook () =
   let rules = create_rulebook () in
@@ -152,13 +181,34 @@ let rec build_num n net =
     let net = connect (s, 1) (rest, 0) net in
     (s, net)
 
-let rec readback net (aid, slot) =
+let rec readback_value net (aid, slot) =
   if slot <> 0 then failwith "readback expects a principal port";
   let a = IntMap.find aid net.agents in
-  match a.symbol with
-  | "Z" -> 0
-  | "S" -> 1 + readback net (PortMap.find (aid, 1) net.wires)
-  | s -> failwith ("readback: unexpected symbol " ^ s ^ " (normal form not a nat?)")
+  let fields =
+    List.init a.arity (fun i -> readback_value net (PortMap.find (aid, i + 1) net.wires))
+  in
+  VConstr (a.symbol, fields)
+
+let rec int_of_value_opt = function
+  | VConstr ("Z", []) -> Some 0
+  | VConstr ("S", [ value ]) ->
+      Option.map (fun n -> n + 1) (int_of_value_opt value)
+  | _ -> None
+
+let rec value_to_string value =
+  match int_of_value_opt value with
+  | Some n -> string_of_int n
+  | None ->
+      match value with
+      | VConstr (name, []) -> name
+      | VConstr (name, fields) ->
+          Printf.sprintf "%s(%s)" name
+            (fields |> List.map value_to_string |> String.concat ", ")
+
+let readback net port =
+  match int_of_value_opt (readback_value net port) with
+  | Some n -> n
+  | None -> failwith "readback: normal form is not a nat"
 
 let make_root net = new_agent "Root" 1 net
 

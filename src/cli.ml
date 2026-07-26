@@ -97,8 +97,9 @@ let main () =
   let result = Driver.run_string ~strategy:cfg.strategy ?seed:cfg.seed source in
   if cfg.dump_ast then Printf.printf "AST: %s\n" (Ast.to_string result.program);
   if cfg.dump_net then Printf.printf "%s\n" (Interaction_net.dump_net result.initial_net);
+  let rendered = Interaction_net.value_to_string result.value in
   if cfg.trace then (
-    Printf.printf "result: %d\n" result.value;
+    Printf.printf "result: %s\n" rendered;
     Printf.printf "steps: %d\n" (Driver.step_count result);
     Printf.printf "trace: %s\n" (Driver.trace result))
-  else Printf.printf "%d\n" result.value
+  else Printf.printf "%s\n" rendered

@@ -1,23 +1,33 @@
 module StringMap = Map.Make (String)
-
 module FunctionMap = Map.Make (String)
+module ConstructorMap = Map.Make (String)
 
 type env = Interaction_net.port StringMap.t
 
-type clause =
-  | ZeroClause of { params : string list; body : Ast.expr }
-  | SuccClause of { binder : string; params : string list; body : Ast.expr }
-  | VarClause of { binder : string; params : string list; body : Ast.expr }
+type match_row = {
+  patterns : Ast.pattern list;
+  body : Ast.expr;
+}
+
+type decision_tree =
+  | Leaf of match_row
+  | Switch of {
+      symbol : string;
+      column : int;
+      preserve : bool;
+      cases : (string * int * decision_tree) list;
+    }
 
 type function_spec = {
   name : string;
   arity : int;
-  clauses : clause list;
+  tree : decision_tree;
 }
 
 type compile_context = {
   rulebook : Interaction_net.rulebook;
   functions : function_spec FunctionMap.t;
+  constructors : int ConstructorMap.t;
 }
 
 type compiled_program = {
@@ -28,6 +38,8 @@ type compiled_program = {
 
 let reserved_function_names =
   [ "add"; "succ"; "Z"; "S"; "Add"; "Dup"; "Era"; "Root" ]
+
+let reserved_constructor_names = [ "Z"; "S"; "Add"; "Dup"; "Era"; "Root" ]
 
 let ensure_fresh name env =
   if StringMap.mem name env then
@@ -71,6 +83,10 @@ let bind_names names ports env =
       StringMap.add name port env)
     env names ports
 
+let erase_port port net =
+  let era_id, net = Interaction_net.new_agent "Era" 0 net in
+  Interaction_net.connect (era_id, 0) port net
+
 let rec compile_expr ctx env net = function
   | Ast.Int n ->
       let id, net = Interaction_net.build_num n net in
@@ -83,6 +99,24 @@ let rec compile_expr ctx env net = function
       let s_id, net = Interaction_net.new_agent "S" 1 net in
       let net = Interaction_net.connect (s_id, 1) inner_port net in
       ((s_id, 0), env, net)
+  | Ast.Constr (name, args) ->
+      let arg_ports, env, net =
+        List.fold_left
+          (fun (ports, env, net) arg ->
+            let port, env, net = compile_expr ctx env net arg in
+            (port :: ports, env, net))
+          ([], env, net) args
+      in
+      let arg_ports = List.rev arg_ports in
+      let ctor_id, net = Interaction_net.new_agent name (List.length arg_ports) net in
+      let net =
+        List.fold_left2
+          (fun net slot port -> Interaction_net.connect (ctor_id, slot) port net)
+          net
+          (List.init (List.length arg_ports) (fun index -> index + 1))
+          arg_ports
+      in
+      ((ctor_id, 0), env, net)
   | Ast.Let (name, value, body) ->
       ensure_fresh name env;
       let value_port, env, net = compile_expr ctx env net value in
@@ -107,13 +141,10 @@ let rec compile_expr ctx env net = function
       (result_port, env_after, net)
   | Ast.Drop (value, body) ->
       let value_port, env, net = compile_expr ctx env net value in
-      let era_id, net = Interaction_net.new_agent "Era" 0 net in
-      let net = Interaction_net.connect (era_id, 0) value_port net in
+      let net = erase_port value_port net in
       compile_expr ctx env net body
-  | Ast.Call ("add", args) ->
-      compile_add ctx env net args
-  | Ast.Call (name, args) ->
-      compile_call ctx env net name args
+  | Ast.Call ("add", args) -> compile_add ctx env net args
+  | Ast.Call (name, args) -> compile_call ctx env net name args
 
 and compile_add ctx env net = function
   | [ lhs; rhs ] ->
@@ -133,8 +164,7 @@ and compile_call ctx env net name args =
     match FunctionMap.find_opt name ctx.functions with
     | Some spec -> spec
     | None ->
-        Ravel_error.compile_error
-          (Printf.sprintf "undefined function '%s'" name)
+        Ravel_error.compile_error (Printf.sprintf "undefined function '%s'" name)
   in
   if List.length args <> spec.arity then
     Ravel_error.compile_error
@@ -150,184 +180,377 @@ and compile_call ctx env net name args =
   let arg_ports = List.rev arg_ports in
   let fn_id, net = Interaction_net.new_agent name spec.arity net in
   let first_arg, rest_args =
-    match arg_ports with
-    | first :: rest -> (first, rest)
-    | [] -> assert false
+    match arg_ports with first :: rest -> (first, rest) | [] -> assert false
   in
   let net = Interaction_net.connect (fn_id, 0) first_arg net in
-  let rec connect_aux slot net = function
-    | [] -> net
-    | arg_port :: rest ->
-        let net = Interaction_net.connect (fn_id, slot) arg_port net in
-        connect_aux (slot + 1) net rest
+  let net =
+    List.fold_left2
+      (fun net slot port -> Interaction_net.connect (fn_id, slot) port net)
+      net
+      (List.init (List.length rest_args) (fun index -> index + 1))
+      rest_args
   in
-  let net = connect_aux 1 net rest_args in
   ((fn_id, spec.arity), env, net)
 
-let names_bound_by_pattern = function
-  | Ast.PZero -> []
-  | Ast.PSucc name -> [ name ]
-  | Ast.PVar name -> [ name ]
+and compile_leaf ctx row values output net =
+  if List.length row.patterns <> List.length values then
+    invalid_arg "compile_leaf";
+  let env, names, net =
+    List.fold_left2
+      (fun (env, names, net) pattern port ->
+        match pattern with
+        | Ast.PVar name ->
+            ensure_fresh name env;
+            (StringMap.add name port env, name :: names, net)
+        | Ast.PWildcard -> (env, names, erase_port port net)
+        | _ -> invalid_arg "compile_leaf: refutable pattern remains")
+      (StringMap.empty, [], net) row.patterns values
+  in
+  let result, env_after, net = compile_expr ctx env net row.body in
+  require_consumed names env_after;
+  Interaction_net.connect result output net
+
+and instantiate_tree ctx tree values output net =
+  match tree with
+  | Leaf row -> compile_leaf ctx row values output net
+  | Switch { symbol; column; preserve; _ } ->
+      let selected = List.nth values column in
+      let others = List.filteri (fun index _ -> index <> column) values in
+      let inspected, auxiliaries, net =
+        if preserve then
+          let dup, net = Interaction_net.new_agent "Dup" 2 net in
+          let net = Interaction_net.connect (dup, 0) selected net in
+          ((dup, 1), others @ [ (dup, 2) ], net)
+        else (selected, others, net)
+      in
+      let agent, net =
+        Interaction_net.new_agent symbol (List.length auxiliaries + 1) net
+      in
+      let net = Interaction_net.connect (agent, 0) inspected net in
+      let ports = auxiliaries @ [ output ] in
+      List.fold_left2
+        (fun net slot port -> Interaction_net.connect (agent, slot) port net)
+        net
+        (List.init (List.length ports) (fun index -> index + 1))
+        ports
+
+let rec names_bound_by_pattern = function
+  | Ast.PZero | Ast.PWildcard -> []
+  | Ast.PSucc name | Ast.PVar name -> [ name ]
+  | Ast.PConstr (_, patterns) ->
+      List.concat (List.map names_bound_by_pattern patterns)
+
+let normalize_pattern = function
+  | Ast.PZero -> Ast.PConstr ("Z", [])
+  | Ast.PSucc name -> Ast.PConstr ("S", [ Ast.PVar name ])
+  | Ast.PConstr ("succ", patterns) -> Ast.PConstr ("S", patterns)
+  | pattern -> pattern
+
+let rec normalize_pattern_deep pattern =
+  match normalize_pattern pattern with
+  | Ast.PConstr (name, patterns) ->
+      Ast.PConstr (name, List.map normalize_pattern_deep patterns)
+  | pattern -> pattern
 
 let validate_definition_shape def =
   if List.mem def.Ast.name reserved_function_names then
     Ravel_error.compile_error
       (Printf.sprintf "function name '%s' is reserved" def.Ast.name);
-  ensure_distinct (names_bound_by_pattern def.Ast.pattern @ def.Ast.params)
-    "parameter";
-  if def.Ast.params = [] then ()
+  if def.Ast.patterns = [] then
+    Ravel_error.compile_error "function definitions must have at least one pattern";
+  let bound_names = List.concat (List.map names_bound_by_pattern def.Ast.patterns) in
+  ensure_distinct bound_names "parameter"
 
-let clause_of_definition def =
-  validate_definition_shape def;
-  match def.Ast.pattern with
-  | Ast.PZero -> ZeroClause { params = def.Ast.params; body = def.Ast.body }
-  | Ast.PSucc binder ->
-      SuccClause { binder; params = def.Ast.params; body = def.Ast.body }
-  | Ast.PVar binder ->
-      VarClause { binder; params = def.Ast.params; body = def.Ast.body }
+let replace_column column replacements items =
+  let rec loop index = function
+    | [] -> if index = column then replacements else []
+    | item :: rest ->
+        if index = column then replacements @ rest
+        else item :: loop (index + 1) rest
+  in
+  loop 0 items
 
-let clause_arity def = 1 + List.length def.Ast.params
+let first_refutable_column rows =
+  match rows with
+  | [] -> None
+  | first :: _ ->
+      let width = List.length first.patterns in
+      let rec search column =
+        if column = width then None
+        else if
+          List.exists
+            (fun row ->
+              match List.nth row.patterns column with
+              | Ast.PConstr _ -> true
+              | _ -> false)
+            rows
+        then Some column
+        else search (column + 1)
+      in
+      search 0
 
-let validate_clauses name arity clauses =
-  match clauses with
-  | [ VarClause _ ] -> { name; arity; clauses }
-  | [ ZeroClause _; SuccClause _ ] | [ SuccClause _; ZeroClause _ ] ->
-      { name; arity; clauses }
-  | [ ZeroClause _ ] | [ SuccClause _ ] ->
+let constructor_at pattern =
+  match pattern with Ast.PConstr (name, fields) -> Some (name, List.length fields) | _ -> None
+
+let unique_constructors patterns =
+  List.fold_left
+    (fun constructors pattern ->
+      match constructor_at pattern with
+      | None -> constructors
+      | Some (name, arity) ->
+          if List.exists (fun (existing, _) -> existing = name) constructors then constructors
+          else constructors @ [ (name, arity) ])
+    [] patterns
+
+let validate_nat_exhaustiveness function_name patterns has_fallback =
+  if not has_fallback then
+    let names =
+      List.filter_map (fun pattern -> Option.map fst (constructor_at pattern)) patterns
+    in
+    let has_z = List.mem "Z" names in
+    let has_s = List.mem "S" names in
+    if has_z <> has_s then
       Ravel_error.compile_error
         (Printf.sprintf
-           "function '%s' is non-exhaustive; provide both 0 and succ(x) clauses or a single catch-all clause"
-           name)
-  | [ VarClause _; _ ] | [ _; VarClause _ ] ->
-      Ravel_error.compile_error
-        (Printf.sprintf
-           "function '%s' cannot mix a catch-all clause with constructor clauses"
-           name)
-  | _ ->
-      Ravel_error.compile_error
-        (Printf.sprintf
-           "function '%s' must have either one catch-all clause or exactly two clauses for 0 and succ(x)"
-           name)
+           "function '%s' is non-exhaustive; natural-number matches must cover both 0 and succ(...) or include a variable or '_' fallback"
+           function_name)
 
-let build_function_specs definitions =
+let fresh_match_symbol =
+  let next = ref 0 in
+  fun function_name ->
+    let id = !next in
+    incr next;
+    Printf.sprintf "$match:%s:%d" function_name id
+
+let rec build_decision_tree constructors function_name rows =
+  match first_refutable_column rows with
+  | None -> (
+      match rows with
+      | row :: _ -> Leaf row
+      | [] -> invalid_arg "build_decision_tree")
+  | Some column ->
+      let column_patterns = List.map (fun row -> List.nth row.patterns column) rows in
+      let has_fallback =
+        List.exists
+          (function Ast.PVar _ | Ast.PWildcard -> true | _ -> false)
+          column_patterns
+      in
+      let preserve =
+        List.exists (function Ast.PVar _ -> true | _ -> false) column_patterns
+      in
+      validate_nat_exhaustiveness function_name column_patterns has_fallback;
+      let constructors_to_branch =
+        if has_fallback then ConstructorMap.bindings constructors
+        else unique_constructors column_patterns
+      in
+      let specialize constructor arity row =
+        let selected = List.nth row.patterns column in
+        let saved_pattern =
+          if preserve then
+            match selected with Ast.PVar name -> Ast.PVar name | _ -> Ast.PWildcard
+          else Ast.PWildcard
+        in
+        let row =
+          if preserve then { row with patterns = row.patterns @ [ saved_pattern ] }
+          else row
+        in
+        match selected with
+        | Ast.PConstr (name, fields) when name = constructor ->
+            Some { row with patterns = replace_column column fields row.patterns }
+        | Ast.PConstr _ -> None
+        | Ast.PVar _ | Ast.PWildcard ->
+            Some
+              {
+                row with
+                patterns =
+                  replace_column column (List.init arity (fun _ -> Ast.PWildcard))
+                    row.patterns;
+              }
+        | Ast.PZero | Ast.PSucc _ -> assert false
+      in
+      let cases =
+        List.filter_map
+          (fun (constructor, arity) ->
+            let specialized = List.filter_map (specialize constructor arity) rows in
+            match specialized with
+            | [] -> None
+            | _ ->
+                Some
+                  ( constructor,
+                    arity,
+                    build_decision_tree constructors function_name specialized ))
+          constructors_to_branch
+      in
+      Switch
+        {
+          symbol = fresh_match_symbol function_name;
+          column;
+          preserve;
+          cases;
+        }
+
+let clause_arity def = List.length def.Ast.patterns
+
+let build_function_specs definitions constructors =
   let grouped = Hashtbl.create 16 in
   List.iter
     (fun def ->
+      validate_definition_shape def;
       let name = def.Ast.name in
-      let entry =
-        match Hashtbl.find_opt grouped name with
-        | None -> (clause_arity def, [ clause_of_definition def ])
-        | Some (arity, clauses) ->
-            let def_arity = clause_arity def in
-            if arity <> def_arity then
-              Ravel_error.compile_error
-                (Printf.sprintf
-                   "function '%s' is defined with inconsistent arities (%d vs %d)"
-                   name arity def_arity);
-            (arity, clause_of_definition def :: clauses)
+      let arity = clause_arity def in
+      let row =
+        {
+          patterns = List.map normalize_pattern_deep def.Ast.patterns;
+          body = def.Ast.body;
+        }
       in
-      Hashtbl.replace grouped name entry)
+      match Hashtbl.find_opt grouped name with
+      | None -> Hashtbl.add grouped name (arity, [ row ])
+      | Some (existing_arity, rows) ->
+          if arity <> existing_arity then
+            Ravel_error.compile_error
+              (Printf.sprintf
+                 "function '%s' is defined with inconsistent arities (%d vs %d)"
+                 name existing_arity arity);
+          Hashtbl.replace grouped name (existing_arity, rows @ [ row ]))
     definitions;
   Hashtbl.fold
-    (fun name (arity, clauses) acc ->
-      let spec = validate_clauses name arity (List.rev clauses) in
-      FunctionMap.add name spec acc)
+    (fun name (arity, rows) specs ->
+      let tree = build_decision_tree constructors name rows in
+      FunctionMap.add name { name; arity; tree } specs)
     grouped FunctionMap.empty
 
-let connect_result result_port output_port net =
-  Interaction_net.connect result_port output_port net
-
-let compile_case_body ctx env names body output_port net =
-  let result_port, env_after, net = compile_expr ctx env net body in
-  require_consumed names env_after;
-  connect_result result_port output_port net
-
-let compile_zero_clause ctx params body ifcF net =
-  let args, output =
-    match List.rev ifcF with
-    | output :: rev_args -> (List.rev rev_args, output)
-    | [] -> assert false
+let rebuild_constructor name fields net =
+  let constructor, net = Interaction_net.new_agent name (List.length fields) net in
+  let net =
+    List.fold_left2
+      (fun net slot field -> Interaction_net.connect (constructor, slot) field net)
+      net
+      (List.init (List.length fields) (fun index -> index + 1))
+      fields
   in
-  let env = bind_names params args StringMap.empty in
-  compile_case_body ctx env params body output net
+  ((constructor, 0), net)
 
-let compile_succ_clause ctx binder params body ifcS ifcF net =
-  let predecessor =
-    match ifcS with
-    | [ p ] -> p
-    | _ -> assert false
-  in
-  let args, output =
-    match List.rev ifcF with
-    | output :: rev_args -> (List.rev rev_args, output)
-    | [] -> assert false
-  in
-  let env = StringMap.empty |> bind_names [ binder ] [ predecessor ] |> bind_names params args in
-  compile_case_body ctx env (binder :: params) body output net
+let split_last items =
+  match List.rev items with
+  | last :: reversed_rest -> (List.rev reversed_rest, last)
+  | [] -> invalid_arg "split_last"
 
-let rebuild_zero net =
-  let z, net = Interaction_net.new_agent "Z" 0 net in
-  ((z, 0), net)
-
-let rebuild_succ predecessor net =
-  let s, net = Interaction_net.new_agent "S" 1 net in
-  let net = Interaction_net.connect (s, 1) predecessor net in
-  ((s, 0), net)
-
-let compile_var_clause_zero ctx binder params body ifcF net =
-  let whole, net = rebuild_zero net in
-  let args, output =
-    match List.rev ifcF with
-    | output :: rev_args -> (List.rev rev_args, output)
-    | [] -> assert false
+let insert_at index inserted items =
+  let rec loop current = function
+    | rest when current = index -> inserted @ rest
+    | item :: rest -> item :: loop (current + 1) rest
+    | [] -> invalid_arg "insert_at"
   in
-  let env =
-    StringMap.empty |> bind_names [ binder ] [ whole ] |> bind_names params args
-  in
-  compile_case_body ctx env (binder :: params) body output net
+  loop 0 items
 
-let compile_var_clause_succ ctx binder params body ifcS ifcF net =
-  let predecessor =
-    match ifcS with
-    | [ p ] -> p
-    | _ -> assert false
-  in
-  let whole, net = rebuild_succ predecessor net in
-  let args, output =
-    match List.rev ifcF with
-    | output :: rev_args -> (List.rev rev_args, output)
-    | [] -> assert false
-  in
-  let env =
-    StringMap.empty |> bind_names [ binder ] [ whole ] |> bind_names params args
-  in
-  compile_case_body ctx env (binder :: params) body output net
+let rec install_tree_rules ctx function_name tree =
+  match tree with
+  | Leaf _ -> ()
+  | Switch { symbol; column; preserve; cases } ->
+      List.iter
+        (fun (constructor, _arity, child) ->
+          Interaction_net.def_rule ctx.rulebook constructor symbol
+            (fun fields interface net ->
+              let auxiliary_values, output = split_last interface in
+              let other_values, saved =
+                if preserve then
+                  let others, saved = split_last auxiliary_values in
+                  (others, Some saved)
+                else (auxiliary_values, None)
+              in
+              let values = insert_at column fields other_values in
+              let values =
+                match saved with Some port -> values @ [ port ] | None -> values
+              in
+              instantiate_tree ctx child values output net);
+          install_tree_rules ctx function_name child)
+        cases
 
-let install_function_rule ctx spec =
-  match spec.clauses with
-  | [ ZeroClause { params; body }; SuccClause { binder; params = s_params; body = s_body } ]
-  | [ SuccClause { binder; params = s_params; body = s_body }; ZeroClause { params; body } ] ->
-      Interaction_net.def_rule ctx.rulebook "Z" spec.name
-        (fun _ifcZ ifcF net -> compile_zero_clause ctx params body ifcF net);
-      Interaction_net.def_rule ctx.rulebook "S" spec.name
-        (fun ifcS ifcF net -> compile_succ_clause ctx binder s_params s_body ifcS ifcF net)
-  | [ VarClause { binder; params; body } ] ->
-      Interaction_net.def_rule ctx.rulebook "Z" spec.name
-        (fun _ifcZ ifcF net -> compile_var_clause_zero ctx binder params body ifcF net);
-      Interaction_net.def_rule ctx.rulebook "S" spec.name
-        (fun ifcS ifcF net -> compile_var_clause_succ ctx binder params body ifcS ifcF net)
-  | _ -> assert false
+let install_function_rules ctx spec =
+  ConstructorMap.iter
+    (fun constructor _arity ->
+      Interaction_net.def_rule ctx.rulebook constructor spec.name
+        (fun fields interface net ->
+          let rest_args, output = split_last interface in
+          let first_arg, net = rebuild_constructor constructor fields net in
+          instantiate_tree ctx spec.tree (first_arg :: rest_args) output net))
+    ctx.constructors;
+  install_tree_rules ctx spec.name spec.tree
 
-let build_context definitions =
-  let functions = build_function_specs definitions in
+let collect_constructor name arity constructors =
+  if List.mem name reserved_constructor_names then
+    Ravel_error.compile_error
+      (Printf.sprintf "constructor name '%s' is reserved" name);
+  match ConstructorMap.find_opt name constructors with
+  | None -> ConstructorMap.add name arity constructors
+  | Some existing_arity ->
+      if existing_arity <> arity then
+        Ravel_error.compile_error
+          (Printf.sprintf
+             "constructor '%s' is used with inconsistent arities (%d vs %d)"
+             name existing_arity arity)
+      else constructors
+
+let rec collect_expr_constructors constructors = function
+  | Ast.Int _ | Ast.Var _ -> constructors
+  | Ast.Succ expr -> collect_expr_constructors constructors expr
+  | Ast.Constr (name, args) ->
+      List.fold_left collect_expr_constructors
+        (collect_constructor name (List.length args) constructors)
+        args
+  | Ast.Let (_, value, body) ->
+      collect_expr_constructors
+        (collect_expr_constructors constructors value)
+        body
+  | Ast.Dup (value, _, _, body) | Ast.Drop (value, body) ->
+      collect_expr_constructors
+        (collect_expr_constructors constructors value)
+        body
+  | Ast.Call (_, args) -> List.fold_left collect_expr_constructors constructors args
+
+let rec collect_pattern_constructors constructors = function
+  | Ast.PZero | Ast.PSucc _ | Ast.PVar _ | Ast.PWildcard -> constructors
+  | Ast.PConstr ("succ", patterns) ->
+      List.fold_left collect_pattern_constructors constructors patterns
+  | Ast.PConstr (name, patterns) ->
+      List.fold_left collect_pattern_constructors
+        (collect_constructor name (List.length patterns) constructors)
+        patterns
+
+let collect_program_constructors program =
+  let constructors =
+    ConstructorMap.empty |> ConstructorMap.add "Z" 0 |> ConstructorMap.add "S" 1
+  in
+  let constructors =
+    List.fold_left
+      (fun constructors def ->
+        let constructors =
+          List.fold_left collect_pattern_constructors constructors def.Ast.patterns
+        in
+        collect_expr_constructors constructors def.Ast.body)
+      constructors program.Ast.definitions
+  in
+  collect_expr_constructors constructors program.Ast.main
+
+let build_context definitions constructors =
+  let functions = build_function_specs definitions constructors in
   let rulebook = Interaction_net.base_rulebook () in
-  let ctx = { rulebook; functions } in
-  functions |> FunctionMap.iter (fun _ spec -> install_function_rule ctx spec);
+  ConstructorMap.iter
+    (fun name arity ->
+      if name <> "Z" && name <> "S" then
+        Interaction_net.install_constructor_rules rulebook name arity)
+    constructors;
+  let ctx = { rulebook; functions; constructors } in
+  FunctionMap.iter (fun _ spec -> install_function_rules ctx spec) functions;
   ctx
 
 let compile program =
-  let ctx = build_context program.Ast.definitions in
-  let result_port, env, net = compile_expr ctx StringMap.empty Interaction_net.empty_net program.main in
+  let constructors = collect_program_constructors program in
+  let ctx = build_context program.Ast.definitions constructors in
+  let result_port, env, net =
+    compile_expr ctx StringMap.empty Interaction_net.empty_net program.main
+  in
   if not (StringMap.is_empty env) then (
     let names = StringMap.bindings env |> List.map fst |> String.concat ", " in
     Ravel_error.compile_error

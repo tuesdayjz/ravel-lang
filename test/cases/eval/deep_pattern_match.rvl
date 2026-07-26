@@ -1,0 +1,5 @@
+def deep(Cons(Cons(x, _), _)) = x
+
+def deep(Nil) = 0
+
+deep(Cons(Cons(4, Nil), Nil))

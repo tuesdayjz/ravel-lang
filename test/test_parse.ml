@@ -21,14 +21,12 @@ let run () =
             [
               {
                 Ast.name = "plus";
-                pattern = Ast.PZero;
-                params = [ "y" ];
+                patterns = [ Ast.PZero; Ast.PVar "y" ];
                 body = Ast.Var "y";
               };
               {
                 Ast.name = "plus";
-                pattern = Ast.PSucc "x";
-                params = [ "y" ];
+                patterns = [ Ast.PSucc "x"; Ast.PVar "y" ];
                 body =
                   Ast.Succ (Ast.Call ("plus", [ Ast.Var "x"; Ast.Var "y" ]));
               };
@@ -49,6 +47,43 @@ let run () =
         }
       in
       Test_support.assert_program_equal "parse_comments_and_whitespace" expected actual);
+
+  Test_support.run_test "parse_nested_constructor_patterns" (fun () ->
+      let actual =
+        Parser.parse
+          (Test_support.read_case (cases_dir ^ "/nested_constructor_patterns.rvl"))
+      in
+      let expected =
+        {
+          Ast.definitions =
+            [
+              {
+                Ast.name = "head_or";
+                patterns =
+                  [
+                    Ast.PConstr ("Cons", [ Ast.PVar "x"; Ast.PWildcard ]);
+                    Ast.PVar "fallback";
+                  ];
+                body = Ast.Var "x";
+              };
+              {
+                Ast.name = "head_or";
+                patterns = [ Ast.PConstr ("Nil", []); Ast.PVar "fallback" ];
+                body = Ast.Var "fallback";
+              };
+            ];
+          main =
+            Ast.Call
+              ( "head_or",
+                [
+                  Ast.Constr
+                    ("Cons", [ Ast.Succ (Ast.Int 0); Ast.Constr ("Nil", []) ]);
+                  Ast.Int 0;
+                ] );
+        }
+      in
+      Test_support.assert_program_equal "parse_nested_constructor_patterns"
+        expected actual);
 
   Test_support.run_test "parse_error" (fun () ->
       Test_support.expect_parse_error "parse_error" (fun () ->

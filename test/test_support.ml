@@ -6,6 +6,18 @@ let assert_int_equal label expected actual =
   if expected <> actual then
     failf "%s: expected %d, got %d" label expected actual
 
+let assert_nat_value_equal label expected actual =
+  match Interaction_net.int_of_value_opt actual with
+  | Some value -> assert_int_equal label expected value
+  | None ->
+      failf "%s: expected nat %d, got %s" label expected
+        (Interaction_net.value_to_string actual)
+
+let assert_value_string_equal label expected actual =
+  let rendered = Interaction_net.value_to_string actual in
+  if expected <> rendered then
+    failf "%s: expected %s, got %s" label expected rendered
+
 let assert_program_equal label expected actual =
   if expected <> actual then
     failf "%s: expected %s, got %s" label (Ast.to_string expected)

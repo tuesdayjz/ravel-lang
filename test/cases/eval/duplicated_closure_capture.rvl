@@ -1,0 +1,3 @@
+let offset = 2 in
+let add_offset = fun(value) = add(offset, value) in
+add(add_offset(3), add_offset(4))

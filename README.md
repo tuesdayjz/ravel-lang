@@ -1,18 +1,28 @@
 # Ravel
 
-`Ravel` is a tiny prototype functional language that compiles to interaction nets.
+Ravel is a small functional language that compiles to interaction nets.
+
+## Features
+
+- User-defined constructor families with `data`
+- Deep, multi-argument pattern matching
+- First-class named functions, lambdas, and lexical closures
+- Recursive and mutually recursive functions
+- Automatic labeled `Dup` and `Era` insertion
+- Explicit `dup` and `drop` for low-level control
+- Deterministic or random interaction-net reduction
 
 ## Syntax
 
 ```text
-program    ::= definition* expr
-
+program    ::= typedef* definition* expr
+typedef    ::= data TYPE_NAME = CONSTRUCTOR ('|' CONSTRUCTOR)*
 definition ::= def NAME(pattern[, pattern ...]) = expr
 
 pattern    ::= 0
              | succ(pattern)
-             | CONSTRUCTOR
              | CONSTRUCTOR(pattern, ...)
+             | CONSTRUCTOR
              | NAME
              | _
 
@@ -20,162 +30,79 @@ expr       ::= INT
              | NAME
              | CONSTRUCTOR
              | succ(expr)
-             | NAME(expr, ...)
+             | expr(expr, ...)
              | CONSTRUCTOR(expr, ...)
+             | fun(NAME[, NAME ...]) = expr
              | let NAME = expr in expr
              | dup expr as NAME, NAME in expr
              | drop expr in expr
              | (expr)
 ```
 
-### Notes
+A `data` declaration groups constructor names. Constructor arities are inferred
+from usage. Declared families are checked for exhaustive matching; built-in
+`Nat = Z | S` uses the same mechanism.
 
-- `add(x, y)` is the built-in addition function.
-- User-defined functions may be recursive, including mutually recursive.
-- Function clauses can pattern-match on any argument.
-- Constructor patterns can be nested to any depth, such as
-  `Cons(Cons(x, _), tail)`.
-- Patterns support `0`, recursive `succ(...)`, user constructors, variable
-  binders, and the `_` wildcard.
-- Clauses are considered in source order; variable and wildcard patterns can
-  be used as fallbacks after more specific clauses.
-- Natural-number matches must cover both `0` and `succ(...)`, unless a
-  variable or `_` fallback covers the remaining values.
-- Concurrency is currently **implicit**: independent subexpressions become
-  independent subnets, so they can reduce in different interleavings even
-  though the language does not yet expose channels, spawning, logic
-  variables, or backtracking.
+## Example
 
-## Linearity
+```ravel
+data Option = None | Some
 
-Variables are **linear**, including function parameters and binders at any
-depth in a pattern:
+def map_option(f, None) = None
 
-- use a variable at most once
-- if you need it twice, duplicate explicitly with `dup`
-- if you do not need a value, erase it explicitly with `drop`
+def map_option(f, Some(value)) = Some(f(value))
 
-Example:
+def twice(f, value) = f(f(value))
 
-```text
-def plus(0, y) = y
+def make_adder(offset) = fun(value) = add(offset, value)
 
-def plus(succ(x), y) = succ(plus(x, y))
-
-def double(n) = dup n as a, b in plus(a, b)
-
-double(3)
+let add_two = make_adder(2) in
+twice(add_two, 3)
 ```
 
-Deep and multi-argument patterns compose directly:
+Variables do not require manual resource management. The compiler inserts:
 
-```text
-def lookup(0, Cons(value, _)) = value
+- `Era` for zero uses
+- a direct wire for one use
+- a fresh labeled `Dup` tree for multiple uses
 
-def lookup(0, Nil) = 0
+Explicit `dup` and `drop` remain supported.
 
-def lookup(succ(index), Cons(_, rest)) = lookup(index, rest)
-
-def lookup(succ(_), Nil) = 0
-
-lookup(2, Cons(4, Cons(5, Cons(6, Nil))))
-```
-
-## Build and Install
-
-Build and install for your user into `~/.local/bin`:
+## Build and test
 
 ```sh
-make && make install
-```
-
-If `~/.local/bin` is not already on your `PATH`, add this to your shell config
-(`~/.bashrc`, `~/.zshrc`, etc.), then reload your shell:
-
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-After that you can run:
-
-```sh
-ravel examples/plus.rvl
-```
-
-For a system-wide install instead:
-
-```sh
-sudo make install PREFIX=/usr/local
-```
-
-To uninstall:
-
-```sh
-make uninstall
-# or
-sudo make uninstall PREFIX=/usr/local
-```
-
-## Test
-
-```sh
+make
 make test
+```
+
+Install for the current user:
+
+```sh
+make install
 ```
 
 ## Run
 
-Evaluate a file:
-
 ```sh
-./ravel examples/plus.rvl
+ravel examples/closures.rvl
+ravel -e "let f = fun(x) = succ(x) in f(4)"
 ```
 
-Evaluate inline source:
+Useful options:
 
 ```sh
-./ravel -e "def id(n) = n
-id(4)"
+ravel --trace examples/closures.rvl
+ravel --dump-ast examples/closures.rvl
+ravel --dump-net examples/closures.rvl
+ravel --strategy random --seed 42 examples/closures.rvl
 ```
 
-Trace reduction:
+## Examples
 
-```sh
-./ravel --trace examples/double.rvl
-```
-
-Try a different reduction strategy:
-
-```sh
-./ravel --trace --strategy random --seed 42 examples/double.rvl
-```
-
-## Example programs
-
-See `examples/`
-
-### Functional
-
-- `examples/fact.rvl` — factorial via linear multiplication
-- `examples/deep_patterns.rvl` — nested constructor matching with an ordered
-  fallback clause
-- `examples/multi_argument_patterns.rvl` — list lookup by matching both the
-  index and list arguments
-
-### Logic-flavored
-
-- `examples/logic_arith.rvl` — arithmetic predicates (`eq`, `leq`, `not`,
-  `and`) returning `0/1`
-
-### Concurrency-flavored
-
-- `examples/work_pool.rvl` — several independent worker computations composed
-  into one result
-
-Try comparing interleavings on the work-pool example:
-
-```sh
-./ravel --trace --strategy first examples/work_pool.rvl
-./ravel --trace --strategy random --seed 42 examples/work_pool.rvl
-```
-
-Both runs should compute the same final value, while the reduction order may differ.
+- `examples/closures.rvl` — closures and higher-order functions
+- `examples/adt_tree_lookup.rvl` — recursive ADTs and optional results
+- `examples/deep_patterns.rvl` — nested constructor matching
+- `examples/multi_argument_patterns.rvl` — matching across arguments
+- `examples/fact.rvl` — recursive arithmetic
+- `examples/logic_arith.rvl` — arithmetic predicates
+- `examples/work_pool.rvl` — independent concurrent reductions

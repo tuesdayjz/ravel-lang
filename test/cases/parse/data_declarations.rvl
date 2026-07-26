@@ -1,0 +1,4 @@
+data List = Nil | Cons
+data Option = None | Some
+
+Some(Nil)

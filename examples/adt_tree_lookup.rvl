@@ -1,0 +1,27 @@
+data Tree = Empty | Node
+data Path = Here | Left | Right
+data Option = None | Some
+
+def lookup(Empty, _) = None
+
+def lookup(Node(value, _, _), Here) = Some(value)
+
+def lookup(Node(_, left, _), Left(rest)) = lookup(left, rest)
+
+def lookup(Node(_, _, right), Right(rest)) = lookup(right, rest)
+
+def unwrap_or(Some(value), _) = value
+
+def unwrap_or(None, fallback) = fallback
+
+unwrap_or(
+  lookup(
+    Node(
+      10,
+      Node(20, Empty, Empty),
+      Node(30, Node(40, Empty, Empty), Empty)
+    ),
+    Right(Left(Here))
+  ),
+  0
+)

@@ -1,8 +1,16 @@
 module StringMap = Map.Make (String)
 module FunctionMap = Map.Make (String)
 module ConstructorMap = Map.Make (String)
+module StringSet = Set.Make (String)
 
-type env = Interaction_net.port StringMap.t
+type env = Interaction_net.port list StringMap.t
+
+type closure_spec = {
+  closure_id : int;
+  params : string list;
+  captures : string list;
+  closure_body : Ast.expr;
+}
 
 type match_row = {
   patterns : Ast.pattern list;
@@ -24,10 +32,16 @@ type function_spec = {
   tree : decision_tree;
 }
 
+type constructor_family = {
+  family_name : string;
+  family_constructors : string list;
+}
+
 type compile_context = {
   rulebook : Interaction_net.rulebook;
   functions : function_spec FunctionMap.t;
   constructors : int ConstructorMap.t;
+  closures : closure_spec list;
 }
 
 type compiled_program = {
@@ -48,22 +62,15 @@ let ensure_fresh name env =
 
 let consume name env =
   match StringMap.find_opt name env with
+  | Some (port :: rest) ->
+      let env =
+        if rest = [] then StringMap.remove name env
+        else StringMap.add name rest env
+      in
+      (port, env)
+  | Some [] -> assert false
   | None ->
-      Ravel_error.compile_error
-        (Printf.sprintf
-           "variable '%s' is undefined or has already been consumed; duplicate explicitly with 'dup' if you need multiple uses"
-           name)
-  | Some port -> (port, StringMap.remove name env)
-
-let require_consumed names env =
-  List.iter
-    (fun name ->
-      if StringMap.mem name env then
-        Ravel_error.compile_error
-          (Printf.sprintf
-             "linearity error: variable '%s' was not used; erase it explicitly with 'drop %s in ...'"
-             name name))
-    names
+      Ravel_error.compile_error (Printf.sprintf "undefined variable '%s'" name)
 
 let ensure_distinct names what =
   let seen = Hashtbl.create 8 in
@@ -75,25 +82,155 @@ let ensure_distinct names what =
       else Hashtbl.add seen name ())
     names
 
-let bind_names names ports env =
-  if List.length names <> List.length ports then invalid_arg "bind_names";
-  List.fold_left2
-    (fun env name port ->
-      ensure_fresh name env;
-      StringMap.add name port env)
-    env names ports
+let rec count_uses name = function
+  | Ast.Int _ -> 0
+  | Ast.Var variable -> if variable = name then 1 else 0
+  | Ast.Succ expr -> count_uses name expr
+  | Ast.Constr (_, args) | Ast.Apply (_, args) as expr -> (
+      match expr with
+      | Ast.Apply (callee, args) ->
+          count_uses name callee
+          + List.fold_left (fun total arg -> total + count_uses name arg) 0 args
+      | Ast.Constr (_, args) ->
+          List.fold_left (fun total arg -> total + count_uses name arg) 0 args
+      | _ -> assert false)
+  | Ast.Let (binder, value, body) ->
+      count_uses name value
+      + if binder = name then 0 else count_uses name body
+  | Ast.Dup (value, left, right, body) ->
+      count_uses name value
+      + if left = name || right = name then 0 else count_uses name body
+  | Ast.Drop (value, body) -> count_uses name value + count_uses name body
+  | Ast.Lambda (params, body) ->
+      if List.mem name params then 0 else count_uses name body
+  | Ast.Closure (_, _, captures, _) ->
+      List.fold_left
+        (fun total capture -> if capture = name then total + 1 else total)
+        0 captures
 
 let erase_port port net =
   let era_id, net = Interaction_net.new_agent "Era" 0 net in
   Interaction_net.connect (era_id, 0) port net
 
+let distribute_port count port net =
+  if count = 0 then ([], erase_port port net)
+  else if count = 1 then ([ port ], net)
+  else
+    let label, net = Interaction_net.fresh_dup_label net in
+    let rec build count port net =
+      if count = 1 then ([ port ], net)
+      else
+        let left_count = count / 2 in
+        let right_count = count - left_count in
+        let dup, net = Interaction_net.new_labeled_dup label net in
+        let net = Interaction_net.connect (dup, 0) port net in
+        let left, net = build left_count (dup, 1) net in
+        let right, net = build right_count (dup, 2) net in
+        (left @ right, net)
+    in
+    build count port net
+
+let bind_for_body name port body env net =
+  ensure_fresh name env;
+  let ports, net = distribute_port (count_uses name body) port net in
+  let env = if ports = [] then env else StringMap.add name ports env in
+  (env, net)
+
+let rec free_vars bound = function
+  | Ast.Int _ -> StringSet.empty
+  | Ast.Var name ->
+      if StringSet.mem name bound then StringSet.empty else StringSet.singleton name
+  | Ast.Succ expr -> free_vars bound expr
+  | Ast.Constr (_, args) ->
+      List.fold_left
+        (fun free arg -> StringSet.union free (free_vars bound arg))
+        StringSet.empty args
+  | Ast.Let (name, value, body) ->
+      StringSet.union (free_vars bound value)
+        (free_vars (StringSet.add name bound) body)
+  | Ast.Dup (value, left, right, body) ->
+      StringSet.union (free_vars bound value)
+        (free_vars (bound |> StringSet.add left |> StringSet.add right) body)
+  | Ast.Drop (value, body) ->
+      StringSet.union (free_vars bound value) (free_vars bound body)
+  | Ast.Lambda (params, body) ->
+      free_vars
+        (List.fold_left (fun bound param -> StringSet.add param bound) bound params)
+        body
+  | Ast.Closure (_, _, captures, _) ->
+      List.fold_left (fun free name -> StringSet.add name free) StringSet.empty captures
+  | Ast.Apply (callee, args) ->
+      List.fold_left
+        (fun free arg -> StringSet.union free (free_vars bound arg))
+        (free_vars bound callee) args
+
+let closure_convert_program program =
+  let rec pattern_names = function
+    | Ast.PZero | Ast.PWildcard -> []
+    | Ast.PSucc name | Ast.PVar name -> [ name ]
+    | Ast.PConstr (_, patterns) -> List.concat (List.map pattern_names patterns)
+  in
+  let next_id = ref 0 in
+  let rec convert bound = function
+    | (Ast.Int _ as expr) -> expr
+    | (Ast.Var _ as expr) -> expr
+    | Ast.Succ expr -> Ast.Succ (convert bound expr)
+    | Ast.Constr (name, args) -> Ast.Constr (name, List.map (convert bound) args)
+    | Ast.Let (name, value, body) ->
+        Ast.Let (name, convert bound value, convert (StringSet.add name bound) body)
+    | Ast.Dup (value, left, right, body) ->
+        let body_bound = bound |> StringSet.add left |> StringSet.add right in
+        Ast.Dup (convert bound value, left, right, convert body_bound body)
+    | Ast.Drop (value, body) -> Ast.Drop (convert bound value, convert bound body)
+    | Ast.Lambda (params, body) ->
+        ensure_distinct params "lambda parameter";
+        let body_bound =
+          List.fold_left (fun names param -> StringSet.add param names) bound params
+        in
+        let body = convert body_bound body in
+        let param_set = List.fold_left (fun set p -> StringSet.add p set) StringSet.empty params in
+        let captures =
+          StringSet.inter bound (free_vars param_set body) |> StringSet.elements
+        in
+        let id = !next_id in
+        incr next_id;
+        Ast.Closure (id, params, captures, body)
+    | Ast.Closure _ -> invalid_arg "closure_convert_program"
+    | Ast.Apply (callee, args) ->
+        Ast.Apply (convert bound callee, List.map (convert bound) args)
+  in
+  let definitions =
+    List.map
+      (fun def ->
+        let bound =
+          List.fold_left
+            (fun names pattern ->
+              List.fold_left (fun names n -> StringSet.add n names) names
+                (pattern_names pattern))
+            StringSet.empty def.Ast.patterns
+        in
+        { def with Ast.body = convert bound def.Ast.body })
+      program.Ast.definitions
+  in
+  { program with Ast.definitions; main = convert StringSet.empty program.Ast.main }
+
+let closure_symbol id = Printf.sprintf "$closure:%d" id
+let function_symbol name = Printf.sprintf "$function:%s" name
+let apply_symbol arity = Printf.sprintf "$apply:%d" arity
+
 let rec compile_expr ctx env net = function
   | Ast.Int n ->
       let id, net = Interaction_net.build_num n net in
       ((id, 0), env, net)
-  | Ast.Var name ->
-      let port, env = consume name env in
-      (port, env, net)
+  | Ast.Var name -> (
+      match StringMap.find_opt name env with
+      | Some _ ->
+          let port, env = consume name env in
+          (port, env, net)
+      | None when FunctionMap.mem name ctx.functions ->
+          let closure, net = Interaction_net.new_agent (function_symbol name) 0 net in
+          ((closure, 0), env, net)
+      | None -> Ravel_error.compile_error (Printf.sprintf "undefined variable '%s'" name))
   | Ast.Succ expr ->
       let inner_port, env, net = compile_expr ctx env net expr in
       let s_id, net = Interaction_net.new_agent "S" 1 net in
@@ -120,9 +257,8 @@ let rec compile_expr ctx env net = function
   | Ast.Let (name, value, body) ->
       ensure_fresh name env;
       let value_port, env, net = compile_expr ctx env net value in
-      let env_with_binding = StringMap.add name value_port env in
+      let env_with_binding, net = bind_for_body name value_port body env net in
       let result_port, env_after, net = compile_expr ctx env_with_binding net body in
-      require_consumed [ name ] env_after;
       (result_port, StringMap.remove name env_after, net)
   | Ast.Dup (value, left, right, body) ->
       ensure_fresh left env;
@@ -130,21 +266,46 @@ let rec compile_expr ctx env net = function
       if left = right then
         Ravel_error.compile_error "dup binders must be distinct";
       let value_port, env, net = compile_expr ctx env net value in
-      let dup_id, net = Interaction_net.new_agent "Dup" 2 net in
+      let dup_id, net = Interaction_net.new_dup net in
       let net = Interaction_net.connect (dup_id, 0) value_port net in
-      let env_with_dups =
-        env |> StringMap.add left (dup_id, 1) |> StringMap.add right (dup_id, 2)
+      let env_with_dups, net = bind_for_body left (dup_id, 1) body env net in
+      let env_with_dups, net =
+        bind_for_body right (dup_id, 2) body env_with_dups net
       in
       let result_port, env_after, net = compile_expr ctx env_with_dups net body in
-      require_consumed [ left; right ] env_after;
       let env_after = env_after |> StringMap.remove left |> StringMap.remove right in
       (result_port, env_after, net)
   | Ast.Drop (value, body) ->
       let value_port, env, net = compile_expr ctx env net value in
       let net = erase_port value_port net in
       compile_expr ctx env net body
-  | Ast.Call ("add", args) -> compile_add ctx env net args
-  | Ast.Call (name, args) -> compile_call ctx env net name args
+  | Ast.Lambda _ -> invalid_arg "compile_expr: unconverted lambda"
+  | Ast.Closure (id, _params, captures, _body) ->
+      let capture_ports, env, net =
+        List.fold_left
+          (fun (ports, env, net) capture ->
+            let port, env, net = compile_expr ctx env net (Ast.Var capture) in
+            (port :: ports, env, net))
+          ([], env, net) captures
+      in
+      let capture_ports = List.rev capture_ports in
+      let closure, net =
+        Interaction_net.new_agent (closure_symbol id) (List.length captures) net
+      in
+      let net =
+        List.fold_left2
+          (fun net slot port -> Interaction_net.connect (closure, slot) port net)
+          net
+          (List.init (List.length captures) (fun index -> index + 1))
+          capture_ports
+      in
+      ((closure, 0), env, net)
+  | Ast.Apply (Ast.Var "add", args) when not (StringMap.mem "add" env) ->
+      compile_add ctx env net args
+  | Ast.Apply (Ast.Var name, _)
+    when not (StringMap.mem name env) && not (FunctionMap.mem name ctx.functions) ->
+      Ravel_error.compile_error (Printf.sprintf "undefined function '%s'" name)
+  | Ast.Apply (callee, args) -> compile_apply ctx env net callee args
 
 and compile_add ctx env net = function
   | [ lhs; rhs ] ->
@@ -158,6 +319,30 @@ and compile_add ctx env net = function
       in
       ((add_id, 2), env, net)
   | _ -> Ravel_error.compile_error "add expects exactly 2 arguments"
+
+and compile_apply ctx env net callee args =
+  let callee_port, env, net = compile_expr ctx env net callee in
+  let arg_ports, env, net =
+    List.fold_left
+      (fun (ports, env, net) arg ->
+        let port, env, net = compile_expr ctx env net arg in
+        (port :: ports, env, net))
+      ([], env, net) args
+  in
+  let arg_ports = List.rev arg_ports in
+  let apply, net =
+    Interaction_net.new_agent (apply_symbol (List.length args))
+      (List.length args + 1) net
+  in
+  let net = Interaction_net.connect (apply, 0) callee_port net in
+  let net =
+    List.fold_left2
+      (fun net slot port -> Interaction_net.connect (apply, slot) port net)
+      net
+      (List.init (List.length arg_ports) (fun index -> index + 1))
+      arg_ports
+  in
+  ((apply, List.length args + 1), env, net)
 
 and compile_call ctx env net name args =
   let spec =
@@ -195,19 +380,16 @@ and compile_call ctx env net name args =
 and compile_leaf ctx row values output net =
   if List.length row.patterns <> List.length values then
     invalid_arg "compile_leaf";
-  let env, names, net =
+  let env, net =
     List.fold_left2
-      (fun (env, names, net) pattern port ->
+      (fun (env, net) pattern port ->
         match pattern with
-        | Ast.PVar name ->
-            ensure_fresh name env;
-            (StringMap.add name port env, name :: names, net)
-        | Ast.PWildcard -> (env, names, erase_port port net)
+        | Ast.PVar name -> bind_for_body name port row.body env net
+        | Ast.PWildcard -> (env, erase_port port net)
         | _ -> invalid_arg "compile_leaf: refutable pattern remains")
-      (StringMap.empty, [], net) row.patterns values
+      (StringMap.empty, net) row.patterns values
   in
-  let result, env_after, net = compile_expr ctx env net row.body in
-  require_consumed names env_after;
+  let result, _env_after, net = compile_expr ctx env net row.body in
   Interaction_net.connect result output net
 
 and instantiate_tree ctx tree values output net =
@@ -218,7 +400,7 @@ and instantiate_tree ctx tree values output net =
       let others = List.filteri (fun index _ -> index <> column) values in
       let inspected, auxiliaries, net =
         if preserve then
-          let dup, net = Interaction_net.new_agent "Dup" 2 net in
+          let dup, net = Interaction_net.new_dup net in
           let net = Interaction_net.connect (dup, 0) selected net in
           ((dup, 1), others @ [ (dup, 2) ], net)
         else (selected, others, net)
@@ -302,18 +484,46 @@ let unique_constructors patterns =
           else constructors @ [ (name, arity) ])
     [] patterns
 
-let validate_nat_exhaustiveness function_name patterns has_fallback =
+let validate_exhaustiveness families function_name patterns has_fallback =
   if not has_fallback then
-    let names =
+    let constructor_names =
       List.filter_map (fun pattern -> Option.map fst (constructor_at pattern)) patterns
     in
-    let has_z = List.mem "Z" names in
-    let has_s = List.mem "S" names in
-    if has_z <> has_s then
-      Ravel_error.compile_error
-        (Printf.sprintf
-           "function '%s' is non-exhaustive; natural-number matches must cover both 0 and succ(...) or include a variable or '_' fallback"
-           function_name)
+    let referenced_families =
+      List.fold_left
+        (fun referenced constructor ->
+          match ConstructorMap.find_opt constructor families with
+          | None -> referenced
+          | Some family ->
+              if
+                List.exists
+                  (fun existing -> existing.family_name = family.family_name)
+                  referenced
+              then referenced
+              else family :: referenced)
+        [] constructor_names
+    in
+    match referenced_families with
+    | [] -> ()
+    | [ family ] ->
+        let missing =
+          List.filter
+            (fun constructor -> not (List.mem constructor constructor_names))
+            family.family_constructors
+        in
+        if missing <> [] then
+          Ravel_error.compile_error
+            (Printf.sprintf
+               "function '%s' is non-exhaustive for data type '%s'; missing constructor(s): %s, or include a variable or '_' fallback"
+               function_name family.family_name (String.concat ", " missing))
+    | families ->
+        let names =
+          families |> List.map (fun family -> family.family_name) |> List.sort_uniq compare
+        in
+        Ravel_error.compile_error
+          (Printf.sprintf
+             "function '%s' mixes constructors from different data types in one pattern column: %s"
+             function_name (String.concat ", " names))
 
 let fresh_match_symbol =
   let next = ref 0 in
@@ -322,7 +532,7 @@ let fresh_match_symbol =
     incr next;
     Printf.sprintf "$match:%s:%d" function_name id
 
-let rec build_decision_tree constructors function_name rows =
+let rec build_decision_tree constructors families function_name rows =
   match first_refutable_column rows with
   | None -> (
       match rows with
@@ -338,7 +548,7 @@ let rec build_decision_tree constructors function_name rows =
       let preserve =
         List.exists (function Ast.PVar _ -> true | _ -> false) column_patterns
       in
-      validate_nat_exhaustiveness function_name column_patterns has_fallback;
+      validate_exhaustiveness families function_name column_patterns has_fallback;
       let constructors_to_branch =
         if has_fallback then ConstructorMap.bindings constructors
         else unique_constructors column_patterns
@@ -378,7 +588,7 @@ let rec build_decision_tree constructors function_name rows =
                 Some
                   ( constructor,
                     arity,
-                    build_decision_tree constructors function_name specialized ))
+                    build_decision_tree constructors families function_name specialized ))
           constructors_to_branch
       in
       Switch
@@ -391,7 +601,7 @@ let rec build_decision_tree constructors function_name rows =
 
 let clause_arity def = List.length def.Ast.patterns
 
-let build_function_specs definitions constructors =
+let build_function_specs definitions constructors families =
   let grouped = Hashtbl.create 16 in
   List.iter
     (fun def ->
@@ -416,7 +626,7 @@ let build_function_specs definitions constructors =
     definitions;
   Hashtbl.fold
     (fun name (arity, rows) specs ->
-      let tree = build_decision_tree constructors name rows in
+      let tree = build_decision_tree constructors families name rows in
       FunctionMap.add name { name; arity; tree } specs)
     grouped FunctionMap.empty
 
@@ -507,7 +717,11 @@ let rec collect_expr_constructors constructors = function
       collect_expr_constructors
         (collect_expr_constructors constructors value)
         body
-  | Ast.Call (_, args) -> List.fold_left collect_expr_constructors constructors args
+  | Ast.Lambda (_, body) | Ast.Closure (_, _, _, body) ->
+      collect_expr_constructors constructors body
+  | Ast.Apply (callee, args) ->
+      List.fold_left collect_expr_constructors
+        (collect_expr_constructors constructors callee) args
 
 let rec collect_pattern_constructors constructors = function
   | Ast.PZero | Ast.PSucc _ | Ast.PVar _ | Ast.PWildcard -> constructors
@@ -533,21 +747,121 @@ let collect_program_constructors program =
   in
   collect_expr_constructors constructors program.Ast.main
 
-let build_context definitions constructors =
-  let functions = build_function_specs definitions constructors in
+let build_constructor_families type_definitions =
+  let nat = { family_name = "Nat"; family_constructors = [ "Z"; "S" ] } in
+  let initial_families =
+    ConstructorMap.empty |> ConstructorMap.add "Z" nat
+    |> ConstructorMap.add "S" nat
+  in
+  let initial_type_names = StringMap.singleton "Nat" () in
+  let _, families =
+    List.fold_left
+      (fun (type_names, families) def ->
+        if StringMap.mem def.Ast.type_name type_names then
+          Ravel_error.compile_error
+            (Printf.sprintf "data type '%s' is declared more than once"
+               def.Ast.type_name);
+        let family =
+          {
+            family_name = def.Ast.type_name;
+            family_constructors = def.Ast.constructors;
+          }
+        in
+        let families =
+          List.fold_left
+            (fun families constructor ->
+              if List.mem constructor reserved_constructor_names then
+                Ravel_error.compile_error
+                  (Printf.sprintf "constructor name '%s' is reserved" constructor);
+              match ConstructorMap.find_opt constructor families with
+              | Some existing ->
+                  Ravel_error.compile_error
+                    (Printf.sprintf
+                       "constructor '%s' already belongs to data type '%s'"
+                       constructor existing.family_name)
+              | None -> ConstructorMap.add constructor family families)
+            families def.Ast.constructors
+        in
+        (StringMap.add def.Ast.type_name () type_names, families))
+      (initial_type_names, initial_families) type_definitions
+  in
+  families
+
+let collect_closures program =
+  let rec collect acc = function
+    | Ast.Int _ | Ast.Var _ -> acc
+    | Ast.Succ expr -> collect acc expr
+    | Ast.Constr (_, args) -> List.fold_left collect acc args
+    | Ast.Let (_, value, body) | Ast.Drop (value, body) ->
+        collect (collect acc value) body
+    | Ast.Dup (value, _, _, body) -> collect (collect acc value) body
+    | Ast.Lambda _ -> invalid_arg "collect_closures: unconverted lambda"
+    | Ast.Closure (id, params, captures, body) ->
+        let spec =
+          { closure_id = id; params; captures; closure_body = body }
+        in
+        collect (spec :: acc) body
+    | Ast.Apply (callee, args) -> List.fold_left collect (collect acc callee) args
+  in
+  let acc =
+    List.fold_left (fun acc def -> collect acc def.Ast.body) []
+      program.Ast.definitions
+  in
+  List.rev (collect acc program.Ast.main)
+
+let bind_closure_inputs body names ports net =
+  List.fold_left2
+    (fun (env, net) name port -> bind_for_body name port body env net)
+    (StringMap.empty, net) names ports
+
+let install_closure_rules ctx =
+  List.iter
+    (fun spec ->
+      let symbol = closure_symbol spec.closure_id in
+      Interaction_net.register_value_symbol ctx.rulebook symbol
+        (List.length spec.captures);
+      Interaction_net.def_rule ctx.rulebook symbol
+        (apply_symbol (List.length spec.params))
+        (fun captures interface net ->
+          let args, output = split_last interface in
+          let names = spec.captures @ spec.params in
+          let ports = captures @ args in
+          let env, net = bind_closure_inputs spec.closure_body names ports net in
+          let result, _env, net = compile_expr ctx env net spec.closure_body in
+          Interaction_net.connect result output net))
+    ctx.closures;
+  FunctionMap.iter
+    (fun name spec ->
+      let symbol = function_symbol name in
+      Interaction_net.register_value_symbol ctx.rulebook symbol 0;
+      Interaction_net.def_rule ctx.rulebook symbol (apply_symbol spec.arity)
+        (fun _closure interface net ->
+          let args, output = split_last interface in
+          instantiate_tree ctx spec.tree args output net))
+    ctx.functions
+
+let build_context type_definitions definitions constructors closures =
+  let families = build_constructor_families type_definitions in
+  let functions = build_function_specs definitions constructors families in
   let rulebook = Interaction_net.base_rulebook () in
   ConstructorMap.iter
     (fun name arity ->
       if name <> "Z" && name <> "S" then
         Interaction_net.install_constructor_rules rulebook name arity)
     constructors;
-  let ctx = { rulebook; functions; constructors } in
+  let ctx = { rulebook; functions; constructors; closures } in
   FunctionMap.iter (fun _ spec -> install_function_rules ctx spec) functions;
+  install_closure_rules ctx;
   ctx
 
 let compile program =
+  let program = closure_convert_program program in
   let constructors = collect_program_constructors program in
-  let ctx = build_context program.Ast.definitions constructors in
+  let closures = collect_closures program in
+  let ctx =
+    build_context program.Ast.type_definitions program.Ast.definitions constructors
+      closures
+  in
   let result_port, env, net =
     compile_expr ctx StringMap.empty Interaction_net.empty_net program.main
   in

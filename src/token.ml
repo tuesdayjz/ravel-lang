@@ -1,7 +1,9 @@
 type kind =
   | TInt of int
   | TIdent of string
+  | TData
   | TDef
+  | TFun
   | TLet
   | TIn
   | TDup
@@ -12,6 +14,7 @@ type kind =
   | TRParen
   | TComma
   | TEqual
+  | TPipe
   | TEOF
 
 type t = {

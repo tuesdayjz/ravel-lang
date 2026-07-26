@@ -6,7 +6,9 @@ type expr =
   | Let of string * expr * expr
   | Dup of expr * string * string * expr
   | Drop of expr * expr
-  | Call of string * expr list
+  | Lambda of string list * expr
+  | Closure of int * string list * string list * expr
+  | Apply of expr * expr list
 
 type pattern =
   | PZero
@@ -15,6 +17,11 @@ type pattern =
   | PWildcard
   | PConstr of string * pattern list
 
+type type_definition = {
+  type_name : string;
+  constructors : string list;
+}
+
 type definition = {
   name : string;
   patterns : pattern list;
@@ -22,6 +29,7 @@ type definition = {
 }
 
 type program = {
+  type_definitions : type_definition list;
   definitions : definition list;
   main : expr;
 }
@@ -47,7 +55,20 @@ let rec expr_to_string = function
   | Drop (value, body) ->
       Printf.sprintf "drop %s in %s" (expr_to_string value)
         (expr_to_string body)
-  | Call (name, args) -> app_to_string expr_to_string name args
+  | Lambda (params, body) ->
+      Printf.sprintf "fun(%s) = %s" (String.concat ", " params)
+        (expr_to_string body)
+  | Closure (_, params, _, body) ->
+      Printf.sprintf "fun(%s) = %s" (String.concat ", " params)
+        (expr_to_string body)
+  | Apply (callee, args) ->
+      Printf.sprintf "%s(%s)" (callee_to_string callee)
+        (args |> List.map expr_to_string |> String.concat ", ")
+
+and callee_to_string = function
+  | (Let _ | Dup _ | Drop _ | Lambda _ | Closure _) as callee ->
+      Printf.sprintf "(%s)" (expr_to_string callee)
+  | callee -> expr_to_string callee
 
 let rec pattern_to_string = function
   | PZero -> "0"
@@ -56,13 +77,19 @@ let rec pattern_to_string = function
   | PWildcard -> "_"
   | PConstr (name, args) -> app_to_string pattern_to_string name args
 
+let type_definition_to_string def =
+  Printf.sprintf "data %s = %s" def.type_name
+    (String.concat " | " def.constructors)
+
 let definition_to_string def =
   let head = def.patterns |> List.map pattern_to_string |> String.concat ", " in
   Printf.sprintf "def %s(%s) = %s" def.name head (expr_to_string def.body)
 
 let to_string program =
-  match program.definitions with
+  let declarations =
+    program.type_definitions |> List.map type_definition_to_string
+  in
+  let definitions = program.definitions |> List.map definition_to_string in
+  match declarations @ definitions with
   | [] -> expr_to_string program.main
-  | defs ->
-      let defs_text = defs |> List.map definition_to_string |> String.concat "\n" in
-      defs_text ^ "\n\n" ^ expr_to_string program.main
+  | items -> String.concat "\n" items ^ "\n\n" ^ expr_to_string program.main

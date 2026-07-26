@@ -13,6 +13,21 @@ let run () =
       let result = Driver.run_file (cases_dir ^ "/double_with_dup.rvl") in
       Test_support.assert_nat_value_equal "eval_double_with_dup" 6 result.value);
 
+  Test_support.run_test "eval_automatic_dup_drop" (fun () ->
+      let result = Driver.run_file (cases_dir ^ "/automatic_dup_drop.rvl") in
+      Test_support.assert_nat_value_equal "eval_automatic_dup_drop" 10 result.value);
+
+  Test_support.run_test "eval_closures" (fun () ->
+      let result = Driver.run_file (cases_dir ^ "/closures.rvl") in
+      Test_support.assert_nat_value_equal "eval_closures" 13 result.value);
+
+  Test_support.run_test "eval_duplicated_closure_capture" (fun () ->
+      let result =
+        Driver.run_file (cases_dir ^ "/duplicated_closure_capture.rvl")
+      in
+      Test_support.assert_nat_value_equal "eval_duplicated_closure_capture" 11
+        result.value);
+
   Test_support.run_test "eval_catchall_clause" (fun () ->
       let result = Driver.run_file (cases_dir ^ "/catchall_clause.rvl") in
       Test_support.assert_nat_value_equal "eval_catchall_clause" 4 result.value);
@@ -25,6 +40,10 @@ let run () =
       let result = Driver.run_file (cases_dir ^ "/constructor_value.rvl") in
       Test_support.assert_value_string_equal "eval_constructor_value"
         "Cons(1, Nil)" result.value);
+
+  Test_support.run_test "eval_declared_option" (fun () ->
+      let result = Driver.run_file (cases_dir ^ "/declared_option.rvl") in
+      Test_support.assert_nat_value_equal "eval_declared_option" 5 result.value);
 
   Test_support.run_test "eval_deep_pattern_match" (fun () ->
       let result = Driver.run_file (cases_dir ^ "/deep_pattern_match.rvl") in
@@ -65,6 +84,15 @@ let run () =
   Test_support.run_test "run_file_fixture" (fun () ->
       let result = Driver.run_file (cases_dir ^ "/builtin_add.rvl") in
       Test_support.assert_nat_value_equal "run_file_fixture" 5 result.value);
+
+  Test_support.run_test "closure_strategy_invariance" (fun () ->
+      let source =
+        Test_support.read_case (cases_dir ^ "/duplicated_closure_capture.rvl")
+      in
+      let first = Driver.run_string ~strategy:Driver.First source in
+      let random = Driver.run_string ~strategy:Driver.Random ~seed:42 source in
+      Test_support.assert_value_string_equal "closure_strategy_invariance"
+        (Interaction_net.value_to_string first.value) random.value);
 
   Test_support.run_test "strategy_invariance" (fun () ->
       let source = Test_support.read_case (cases_dir ^ "/double_with_dup.rvl") in

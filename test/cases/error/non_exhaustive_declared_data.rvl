@@ -1,0 +1,5 @@
+data List = Nil | Cons
+
+def is_empty(Nil) = 1
+
+is_empty(Nil)

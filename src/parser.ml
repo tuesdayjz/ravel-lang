@@ -27,6 +27,13 @@ let is_constructor_name name =
   | 'A' .. 'Z' -> true
   | _ -> false
 
+let expect_constructor_name st description =
+  let name = expect_ident st (Printf.sprintf "expected %s" description) in
+  if not (is_constructor_name name) then
+    Ravel_error.parse_error (current_pos st)
+      (Printf.sprintf "%s '%s' must begin with an uppercase letter" description name);
+  name
+
 let rec parse_nonempty_args st =
   let rec loop acc =
     let expr = parse_expr st in
@@ -46,18 +53,12 @@ and parse_args st =
   | Token.TRParen -> []
   | _ -> parse_nonempty_args st
 
-and parse_named_application_after_name st name =
-  expect st matches_lparen "expected '(' after name";
+and parse_parenthesized_args st =
+  expect st matches_lparen "expected '(' before argument list";
   let args = parse_args st in
   expect st (function Token.TRParen -> true | _ -> false)
     "expected ')' after argument list";
-  if is_constructor_name name then Ast.Constr (name, args)
-  else
-    match args with
-    | [] ->
-        Ravel_error.parse_error (current_pos st)
-          "function calls must have at least one argument"
-    | _ -> Ast.Call (name, args)
+  args
 
 and parse_succ_expr st =
   expect st (function Token.TSucc -> true | _ -> false) "expected 'succ'";
@@ -73,7 +74,8 @@ and parse_expr st =
   | Token.TLet -> parse_let st
   | Token.TDup -> parse_dup st
   | Token.TDrop -> parse_drop st
-  | _ -> parse_atom st
+  | Token.TFun -> parse_lambda st
+  | _ -> parse_postfix st
 
 and parse_let st =
   expect st (function Token.TLet -> true | _ -> false) "expected 'let'";
@@ -108,6 +110,40 @@ and parse_drop st =
   let body = parse_expr st in
   Ast.Drop (value, body)
 
+and parse_lambda st =
+  expect st (function Token.TFun -> true | _ -> false) "expected 'fun'";
+  expect st matches_lparen "expected '(' after 'fun'";
+  let params =
+    match current_kind st with
+    | Token.TRParen -> []
+    | _ ->
+        let rec loop acc =
+          let param = expect_ident st "expected lambda parameter" in
+          match current_kind st with
+          | Token.TComma ->
+              advance st;
+              loop (param :: acc)
+          | Token.TRParen -> List.rev (param :: acc)
+          | _ ->
+              Ravel_error.parse_error (current_pos st)
+                "expected ',' or ')' in lambda parameter list"
+        in
+        loop []
+  in
+  expect st (function Token.TRParen -> true | _ -> false)
+    "expected ')' after lambda parameters";
+  expect st (function Token.TEqual -> true | _ -> false)
+    "expected '=' after lambda parameters";
+  Ast.Lambda (params, parse_expr st)
+
+and parse_postfix st =
+  let rec loop callee =
+    match current_kind st with
+    | Token.TLParen -> loop (Ast.Apply (callee, parse_parenthesized_args st))
+    | _ -> callee
+  in
+  loop (parse_atom st)
+
 and parse_atom st =
   match current_kind st with
   | Token.TInt n ->
@@ -115,8 +151,10 @@ and parse_atom st =
       Ast.Int n
   | Token.TIdent name ->
       advance st;
-      if matches_lparen (current_kind st) then parse_named_application_after_name st name
-      else if is_constructor_name name then Ast.Constr (name, [])
+      if is_constructor_name name then
+        if matches_lparen (current_kind st) then
+          Ast.Constr (name, parse_parenthesized_args st)
+        else Ast.Constr (name, [])
       else Ast.Var name
   | Token.TSucc -> parse_succ_expr st
   | Token.TLParen ->
@@ -196,6 +234,22 @@ and parse_pattern st =
       Ravel_error.parse_error (current_pos st)
         "expected a pattern (0, succ(...), constructor, variable, or _)"
 
+let parse_type_definition st =
+  expect st (function Token.TData -> true | _ -> false) "expected 'data'";
+  let type_name = expect_constructor_name st "type name" in
+  expect st (function Token.TEqual -> true | _ -> false)
+    "expected '=' after type name";
+  let first = expect_constructor_name st "constructor name" in
+  let rec parse_constructors acc =
+    match current_kind st with
+    | Token.TPipe ->
+        advance st;
+        let constructor = expect_constructor_name st "constructor name" in
+        parse_constructors (constructor :: acc)
+    | _ -> List.rev acc
+  in
+  { Ast.type_name; constructors = parse_constructors [ first ] }
+
 let parse_definition st =
   expect st (function Token.TDef -> true | _ -> false) "expected 'def'";
   let name = expect_ident st "expected function name after 'def'" in
@@ -218,6 +272,14 @@ let parse_definition st =
 let parse source =
   let tokens = Lexer.tokenize source |> Array.of_list in
   let st = { tokens; index = 0 } in
+  let rec parse_type_defs acc =
+    match current_kind st with
+    | Token.TData ->
+        let def = parse_type_definition st in
+        parse_type_defs (def :: acc)
+    | _ -> List.rev acc
+  in
+  let type_definitions = parse_type_defs [] in
   let rec parse_defs acc =
     match current_kind st with
     | Token.TDef ->
@@ -228,5 +290,5 @@ let parse source =
   let definitions = parse_defs [] in
   let main = parse_expr st in
   match current_kind st with
-  | Token.TEOF -> { Ast.definitions; main }
+  | Token.TEOF -> { Ast.type_definitions; definitions; main }
   | _ -> Ravel_error.parse_error (current_pos st) "unexpected trailing input"

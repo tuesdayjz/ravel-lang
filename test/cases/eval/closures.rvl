@@ -1,0 +1,11 @@
+def increment(value) = succ(value)
+
+def apply(f, x) = f(x)
+
+def twice(f, x) = f(f(x))
+
+def make_adder(offset) = fun(value) = add(offset, value)
+
+let add_two = make_adder(2) in
+let bump = fun(value) = succ(value) in
+add(add(twice(bump, 3), apply(add_two, 5)), apply(increment, 0))

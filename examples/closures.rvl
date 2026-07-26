@@ -1,0 +1,6 @@
+def twice(f, value) = f(f(value))
+
+def make_adder(offset) = fun(value) = add(offset, value)
+
+let add_two = make_adder(2) in
+add(twice(add_two, 3), twice(add_two, 5))

@@ -1,0 +1,5 @@
+def choose_first(x, unused) = x
+
+def double(n) = add(n, n)
+
+add(choose_first(4, 99), double(3))

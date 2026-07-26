@@ -25,10 +25,12 @@ let usage () =
      \  ravel -e \"PROGRAM\" [--trace] [--dump-ast] [--dump-net] [--strategy first|random] [--seed N]\n\
      \  ravel FILE.rvl [--trace] [--dump-ast] [--dump-net] [--strategy first|random] [--seed N]\n\n\
      Program syntax:\n\
-     \  program ::= definition* expr\n\
-     \  definition ::= def NAME(PATTERN[, NAME ...]) = expr\n\
-     \  PATTERN ::= 0 | succ(NAME) | NAME\n\
-     \  expr ::= INT | NAME | succ(expr) | NAME(expr, ...)\n\
+     \  program ::= typedef* definition* expr\n\
+     \  typedef ::= data TYPE_NAME = CONSTRUCTOR ('|' CONSTRUCTOR)*\n\
+     \  definition ::= def NAME(pattern[, pattern ...]) = expr\n\
+     \  pattern ::= 0 | succ(pattern) | CONSTRUCTOR(pattern, ...) | NAME | _\n\
+     \  expr ::= INT | NAME | succ(expr) | expr(expr, ...)\n\
+     \         | fun(NAME[, NAME ...]) = expr\n\
      \         | let NAME = expr in expr\n\
      \         | dup expr as NAME, NAME in expr\n\
      \         | drop expr in expr\n\

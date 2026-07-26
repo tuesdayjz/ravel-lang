@@ -1,0 +1,2 @@
+let apply = fun(f, x) = f(x) in
+apply(fun(n) = succ(n), 4)

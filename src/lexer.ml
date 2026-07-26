@@ -9,7 +9,9 @@ let is_ident_continue = function
   | _ -> false
 
 let keyword_or_ident = function
+  | "data" -> Token.TData
   | "def" -> Token.TDef
+  | "fun" -> Token.TFun
   | "let" -> Token.TLet
   | "in" -> Token.TIn
   | "dup" -> Token.TDup
@@ -79,6 +81,15 @@ let tokenize source =
           let tok =
             {
               Token.kind = Token.TEqual;
+              start_pos;
+              end_pos = pos line (column + 1);
+            }
+          in
+          lex (i + 1) line (column + 1) (tok :: acc)
+      | '|' ->
+          let tok =
+            {
+              Token.kind = Token.TPipe;
               start_pos;
               end_pos = pos line (column + 1);
             }

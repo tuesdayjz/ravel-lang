@@ -5,8 +5,9 @@ let run () =
       let actual = Parser.parse (Test_support.read_case (cases_dir ^ "/expression_only_program.rvl")) in
       let expected =
         {
-          Ast.definitions = [];
-          main = Ast.Call ("add", [ Ast.Int 2; Ast.Int 3 ]);
+          Ast.type_definitions = [];
+          definitions = [];
+          main = Ast.Apply (Ast.Var "add", [ Ast.Int 2; Ast.Int 3 ]);
         }
       in
       Test_support.assert_program_equal "parse_expression_only_program" expected actual);
@@ -17,7 +18,8 @@ let run () =
       in
       let expected =
         {
-          Ast.definitions =
+          Ast.type_definitions = [];
+          definitions =
             [
               {
                 Ast.name = "plus";
@@ -28,10 +30,11 @@ let run () =
                 Ast.name = "plus";
                 patterns = [ Ast.PSucc "x"; Ast.PVar "y" ];
                 body =
-                  Ast.Succ (Ast.Call ("plus", [ Ast.Var "x"; Ast.Var "y" ]));
+                  Ast.Succ
+                    (Ast.Apply (Ast.Var "plus", [ Ast.Var "x"; Ast.Var "y" ]));
               };
             ];
-          main = Ast.Call ("plus", [ Ast.Int 2; Ast.Int 3 ]);
+          main = Ast.Apply (Ast.Var "plus", [ Ast.Int 2; Ast.Int 3 ]);
         }
       in
       Test_support.assert_program_equal "parse_function_definition_program" expected actual);
@@ -42,7 +45,8 @@ let run () =
       in
       let expected =
         {
-          Ast.definitions = [];
+          Ast.type_definitions = [];
+          definitions = [];
           main = Ast.Let ("x", Ast.Int 2, Ast.Drop (Ast.Var "x", Ast.Int 0));
         }
       in
@@ -55,7 +59,8 @@ let run () =
       in
       let expected =
         {
-          Ast.definitions =
+          Ast.type_definitions = [];
+          definitions =
             [
               {
                 Ast.name = "head_or";
@@ -73,8 +78,8 @@ let run () =
               };
             ];
           main =
-            Ast.Call
-              ( "head_or",
+            Ast.Apply
+              ( Ast.Var "head_or",
                 [
                   Ast.Constr
                     ("Cons", [ Ast.Succ (Ast.Int 0); Ast.Constr ("Nil", []) ]);
@@ -84,6 +89,46 @@ let run () =
       in
       Test_support.assert_program_equal "parse_nested_constructor_patterns"
         expected actual);
+
+  Test_support.run_test "parse_data_declarations" (fun () ->
+      let actual =
+        Parser.parse (Test_support.read_case (cases_dir ^ "/data_declarations.rvl"))
+      in
+      let expected =
+        {
+          Ast.type_definitions =
+            [
+              { Ast.type_name = "List"; constructors = [ "Nil"; "Cons" ] };
+              { Ast.type_name = "Option"; constructors = [ "None"; "Some" ] };
+            ];
+          definitions = [];
+          main = Ast.Constr ("Some", [ Ast.Constr ("Nil", []) ]);
+        }
+      in
+      Test_support.assert_program_equal "parse_data_declarations" expected actual);
+
+  Test_support.run_test "parse_lambda_application" (fun () ->
+      let actual =
+        Parser.parse (Test_support.read_case (cases_dir ^ "/lambda_application.rvl"))
+      in
+      let expected =
+        {
+          Ast.type_definitions = [];
+          definitions = [];
+          main =
+            Ast.Let
+              ( "apply",
+                Ast.Lambda
+                  ([ "f"; "x" ], Ast.Apply (Ast.Var "f", [ Ast.Var "x" ])),
+                Ast.Apply
+                  ( Ast.Var "apply",
+                    [
+                      Ast.Lambda ([ "n" ], Ast.Succ (Ast.Var "n"));
+                      Ast.Int 4;
+                    ] ) );
+        }
+      in
+      Test_support.assert_program_equal "parse_lambda_application" expected actual);
 
   Test_support.run_test "parse_error" (fun () ->
       Test_support.expect_parse_error "parse_error" (fun () ->

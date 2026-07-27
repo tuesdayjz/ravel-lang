@@ -1,0 +1,20 @@
+(library
+ (name ravel_lib)
+ (wrapped false)
+ (modules
+  ravel_error
+  ast
+  token
+  interaction_net
+  lexer
+  parser
+  compiler
+  driver
+  cli))
+
+(executable
+ (name main)
+ (public_name ravel)
+ (package ravel)
+ (modules main)
+ (libraries ravel_lib))

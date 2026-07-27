@@ -1,3 +1,6 @@
+.opam-switch/
+_opam/
+_build/
 ravel
 ravel_test
 out.txt

@@ -1,0 +1,22 @@
+opam-version: "2.0"
+synopsis: "A small functional language compiled to interaction nets"
+description: """
+Ravel supports algebraic data, deep pattern matching, first-class closures,
+and labeled duplication on an interaction-net runtime.
+"""
+maintainer: ["Ravel contributors"]
+authors: ["Ravel contributors"]
+homepage: "https://github.com/tuesdayjz/ravel-lang"
+bug-reports: "https://github.com/tuesdayjz/ravel-lang/issues"
+dev-repo: "git+https://github.com/tuesdayjz/ravel-lang.git"
+license: "MIT"
+depends: [
+  "ocaml" {>= "4.13"}
+  "dune" {>= "3.11"}
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]
+run-test: [
+  ["dune" "runtest" "-p" name "-j" jobs]
+]

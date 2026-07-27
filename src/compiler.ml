@@ -86,14 +86,11 @@ let rec count_uses name = function
   | Ast.Int _ -> 0
   | Ast.Var variable -> if variable = name then 1 else 0
   | Ast.Succ expr -> count_uses name expr
-  | Ast.Constr (_, args) | Ast.Apply (_, args) as expr -> (
-      match expr with
-      | Ast.Apply (callee, args) ->
-          count_uses name callee
-          + List.fold_left (fun total arg -> total + count_uses name arg) 0 args
-      | Ast.Constr (_, args) ->
-          List.fold_left (fun total arg -> total + count_uses name arg) 0 args
-      | _ -> assert false)
+  | Ast.Constr (_, args) ->
+      List.fold_left (fun total arg -> total + count_uses name arg) 0 args
+  | Ast.Apply (callee, args) ->
+      count_uses name callee
+      + List.fold_left (fun total arg -> total + count_uses name arg) 0 args
   | Ast.Let (binder, value, body) ->
       count_uses name value
       + if binder = name then 0 else count_uses name body
@@ -343,39 +340,6 @@ and compile_apply ctx env net callee args =
       arg_ports
   in
   ((apply, List.length args + 1), env, net)
-
-and compile_call ctx env net name args =
-  let spec =
-    match FunctionMap.find_opt name ctx.functions with
-    | Some spec -> spec
-    | None ->
-        Ravel_error.compile_error (Printf.sprintf "undefined function '%s'" name)
-  in
-  if List.length args <> spec.arity then
-    Ravel_error.compile_error
-      (Printf.sprintf "function '%s' expects %d arguments, got %d" name spec.arity
-         (List.length args));
-  let arg_ports, env, net =
-    List.fold_left
-      (fun (ports, env, net) arg ->
-        let port, env, net = compile_expr ctx env net arg in
-        (port :: ports, env, net))
-      ([], env, net) args
-  in
-  let arg_ports = List.rev arg_ports in
-  let fn_id, net = Interaction_net.new_agent name spec.arity net in
-  let first_arg, rest_args =
-    match arg_ports with first :: rest -> (first, rest) | [] -> assert false
-  in
-  let net = Interaction_net.connect (fn_id, 0) first_arg net in
-  let net =
-    List.fold_left2
-      (fun net slot port -> Interaction_net.connect (fn_id, slot) port net)
-      net
-      (List.init (List.length rest_args) (fun index -> index + 1))
-      rest_args
-  in
-  ((fn_id, spec.arity), env, net)
 
 and compile_leaf ctx row values output net =
   if List.length row.patterns <> List.length values then

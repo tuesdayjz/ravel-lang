@@ -70,7 +70,10 @@ Explicit `dup` and `drop` remain supported.
 
 ## Build and test
 
+Install the opam-managed dependencies, then build with Dune:
+
 ```sh
+opam install . --deps-only --with-test
 make
 make test
 ```

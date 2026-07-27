@@ -1,0 +1,13 @@
+(data_only_dirs cases)
+
+(executable
+ (name test_main)
+ (modules test_support test_parse test_eval test_error test_main)
+ (libraries ravel_lib))
+
+(rule
+ (alias runtest)
+ (deps (source_tree cases))
+ (action
+  (chdir %{workspace_root}
+   (run %{exe:test_main.exe}))))
